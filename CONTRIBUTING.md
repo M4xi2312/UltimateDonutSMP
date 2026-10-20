@@ -7,8 +7,8 @@ Thank you for your interest in contributing to **UltimateDonutSmp**! We welcome 
 ## Code of Conduct & Rules
 
 - **Respect Licensing**: UltimateDonutSmp is released under a proprietary license. Contributions submitted to this repository become part of the project under its existing licensing terms. See [LICENSE.md](LICENSE.md).
-- **Maintain Clean Code**: Follow the existing Java and Maven project structure. Write readable, well-structured code and keep new code consistent with the surrounding style.
-- **Test Before Submitting**: Make sure the project builds and the unit tests pass (`mvn clean test`, then `mvn package -DskipTests`) before opening a pull request.
+- **Maintain Clean Code**: Follow the existing Java and Gradle project structure. Write readable, well-structured code and keep new code consistent with the surrounding style.
+- **Test Before Submitting**: Make sure the project builds and the unit tests pass (`./gradlew clean test`, then `./gradlew shadowJar`) before opening a pull request.
 - **Keep Docs In Sync**: If you add or change a command, permission node, or configuration key, update [README.md](README.md) and the matching page under [`docs/wiki/`](docs/wiki) in the same pull request.
 
 ---
@@ -17,9 +17,9 @@ Thank you for your interest in contributing to **UltimateDonutSmp**! We welcome 
 
 | Item | Value |
 | --- | --- |
-| Language level | Java 21 (`maven.compiler.release`) |
+| Language level | Java 21 (`options.release` in `build.gradle.kts`) |
 | CI toolchain | JDK 25 (Temurin), as used by `.github/workflows/pr-checks.yml` |
-| Build system | Apache Maven (`mvn`) |
+| Build system | Gradle 9.8.2 with Kotlin DSL (`./gradlew`); dependency versions live in `gradle/libs.versions.toml` |
 | Target platforms | Paper/Spigot `1.21.10` – `26.3`, Folia `1.21.11` – `26.3` |
 | Hard dependencies | PlaceholderAPI, ProtocolLib (declared under `depend` in `plugin.yml`) |
 | Soft dependencies | LuckPerms, Vault, Apollo, Multiverse-Core, floodgate, SkinsRestorer |
@@ -32,15 +32,15 @@ Hard dependencies may be used directly.
 Useful commands:
 
 ```bash
-mvn clean test
+./gradlew clean test
 ```
 
 ```bash
-mvn package -DskipTests
+./gradlew shadowJar
 ```
 
-On Windows you can also run `build.bat`, which wraps `mvn clean package`.
-The build produces a single shaded jar in `target/` that detects Paper, Spigot, or Folia at runtime.
+On Windows you can also run `build.bat`, which wraps `gradlew.bat clean build`.
+The build produces a single shaded jar in `build/libs/` that detects Paper, Spigot, or Folia at runtime.
 
 ---
 
@@ -63,7 +63,7 @@ The build produces a single shaded jar in `target/` that detects Paper, Spigot, 
 2. **Make your changes**, following the project's existing conventions.
 3. **Build and test locally**:
    ```bash
-   mvn clean test
+   ./gradlew clean test
    ```
 4. **Commit** with a clear, descriptive message.
 5. **Push to your fork** and open a **Pull Request** against the `main` branch.
@@ -77,7 +77,7 @@ Every PR runs `.github/workflows/pr-checks.yml`, which enforces:
   `feat`, `fix`, `chore`, `docs`, `style`, `refactor`, `perf`, `test`, `ci`, `build`.
   A scope is optional but encouraged, e.g. `fix(folia): stop resolving inventory holders off-region`.
 - **Non-empty PR description** — at least 10 characters of real explanation.
-- **Build & test on JDK 25** — `mvn clean test` followed by `mvn package -DskipTests`.
+- **Build & test on JDK 25** — `./gradlew clean test` followed by `./gradlew shadowJar`.
 - **Dependency review scan** on any dependency change.
 
 Templates are available under `.github/PULL_REQUEST_TEMPLATE/` for bug fixes, features, and

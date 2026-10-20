@@ -11,7 +11,7 @@
 
 ## How to Test
 <!-- Describe the steps required to test/reproduce this change -->
-1. Run unit tests with the command `mvn test`
+1. Run unit tests with the command `./gradlew test`
 2. Deploy the plugin to a test server (Paper/Spigot/Folia)
 3. Perform the following test steps:
    - ...

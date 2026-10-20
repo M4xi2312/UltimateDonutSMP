@@ -89,13 +89,13 @@ jobs:
 
           if since_date:
               print(f"Fetching plugin commits since date: '{since_date}'...")
-              cmd = ["git", "log", "--pretty=format:%s", f"--since={since_date}", "--", "src/", "pom.xml"]
+              cmd = ["git", "log", "--pretty=format:%s", f"--since={since_date}", "--", "src/", "pom.xml", "build.gradle.kts", "gradle/libs.versions.toml"]
           elif since_commit:
               print(f"Fetching plugin commits since commit ID: '{since_commit}'...")
-              cmd = ["git", "log", "--pretty=format:%s", f"{since_commit}..HEAD", "--", "src/", "pom.xml"]
+              cmd = ["git", "log", "--pretty=format:%s", f"{since_commit}..HEAD", "--", "src/", "pom.xml", "build.gradle.kts", "gradle/libs.versions.toml"]
           else:
               print("No since_date or since_commit provided. Using default since date: '2026-08-03'...")
-              cmd = ["git", "log", "--pretty=format:%s", "--since=2026-08-03", "--", "src/", "pom.xml"]
+              cmd = ["git", "log", "--pretty=format:%s", "--since=2026-08-03", "--", "src/", "pom.xml", "build.gradle.kts", "gradle/libs.versions.toml"]
 
           log_res = subprocess.run(cmd, capture_output=True, text=True)
           commits = [line.strip() for line in log_res.stdout.splitlines() if line.strip()]
@@ -107,7 +107,7 @@ jobs:
               official_tags = [t.strip() for t in tags_res.stdout.splitlines() if t.strip()]
               prev_official = [t for t in official_tags if t != tag_name and not any(p in t for p in ["-pre", "-rc", "-beta", "-alpha"])]
               prev_tag = prev_official[-1] if prev_official else "v1.4.1"
-              cmd = ["git", "log", "--pretty=format:%s", f"{prev_tag}..HEAD", "--", "src/", "pom.xml"]
+              cmd = ["git", "log", "--pretty=format:%s", f"{prev_tag}..HEAD", "--", "src/", "pom.xml", "build.gradle.kts", "gradle/libs.versions.toml"]
               log_res = subprocess.run(cmd, capture_output=True, text=True)
               commits = [line.strip() for line in log_res.stdout.splitlines() if line.strip()]
 

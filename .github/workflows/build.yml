@@ -6,7 +6,10 @@ on:
       - main
     paths:
       - 'src/**'
-      - 'pom.xml'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradle/**'
   workflow_dispatch:
 
 permissions:
@@ -34,22 +37,22 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '25'
-          cache: 'maven'
+          cache: 'gradle'
 
       - name: Build Project
-        run: mvn clean package
+        run: ./gradlew clean build
 
       - name: Get Project Version
         id: metadata
         run: |
-          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          VERSION=$(grep '^version=' gradle.properties | cut -d= -f2)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Upload Shaded Jar
         uses: actions/upload-artifact@v7
         with:
           name: UltimateDonutSmp-${{ steps.metadata.outputs.version }}
-          path: target/UltimateDonutSmp-*.jar
+          path: build/libs/UltimateDonutSmp-*.jar
           if-no-files-found: error
 
       - name: Update Nightly Tag
@@ -73,7 +76,7 @@ jobs:
             - **Build Date:** ${{ github.event.head_commit.timestamp }}
             - **Build:** #${{ github.run_number }}
           prerelease: true
-          files: target/UltimateDonutSmp-${{ steps.metadata.outputs.version }}.jar
+          files: build/libs/UltimateDonutSmp-${{ steps.metadata.outputs.version }}.jar
           make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

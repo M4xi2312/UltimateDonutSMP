@@ -92,7 +92,7 @@ Gameplay clips:
 | Default storage | SQLite, bundled through the shaded JDBC driver |
 | Alternative storage | MySQL or MongoDB |
 | Optional network layer | Redis for cross-server staff chat, alerts, maintenance, reports, helpop, and server status |
-| Build environment | Maven available as `mvn`, internet access, and a JDK 21 or newer toolchain (CI builds on JDK 25) |
+| Build environment | Internet access and a JDK 17 or newer to start the Gradle wrapper; it downloads Gradle 9.8.2 and, if missing, the JDK 25 compile toolchain (CI builds on JDK 25) |
 
 Required plugins (the server will not enable UltimateDonutSmp without them):
 
@@ -112,21 +112,21 @@ The plugin starts without the optional integrations. Their related permission, e
 
 ## Building
 
-Build the project using standard Maven or the build script:
+Build the project with the Gradle wrapper or the build script:
 
 ```bat
 build.bat
 ```
 
-Or run Maven directly:
+Or run Gradle directly:
 
 ```bash
-mvn clean package
+./gradlew clean build
 ```
 
 The build compiles the codebase against the target API and packages a single unified JAR that automatically detects and adapts to Paper, Purpur, Pufferfish, Spigot, or Folia at runtime.
 
-Generated artifact is saved to the `target/` directory:
+Generated artifact is saved to the `build/libs/` directory:
 
 - `UltimateDonutSmp-1.6.jar` (shaded JAR)
 

@@ -1,8 +1,10 @@
-target/
+build/
+.gradle/
+.kotlin/
 .idea/
 .vscode/
-dependency-reduced-pom.xml
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 *.zip
 *.log
 node_modules/

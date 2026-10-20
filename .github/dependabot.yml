@@ -3,8 +3,8 @@
 
 version: 2
 updates:
-  # Maintain Java / Maven dependencies in pom.xml
-  - package-ecosystem: "maven"
+  # Maintain Java / Gradle dependencies in gradle/libs.versions.toml
+  - package-ecosystem: "gradle"
     directory: "/"
     schedule:
       interval: "weekly"
@@ -31,9 +31,10 @@ updates:
       adventure-text:
         patterns:
           - "net.kyori:*"
-      maven-plugins:
+      gradle-plugins:
         patterns:
-          - "org.apache.maven.plugins:*"
+          - "com.gradleup.shadow*"
+          - "org.gradle.toolchains*"
 
     # Ignore core Minecraft server API version bumps to prevent unintended API breakage.
     # Minecraft server API targets should be bumped manually alongside server compatibility updates.

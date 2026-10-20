@@ -11,18 +11,18 @@ This guide provides step-by-step instructions for installing and configuring **U
 | **Java Version** | Java 21+ | Minecraft 26.1+ requires Java 25 |
 | **Server Engine** | Paper, Purpur, Pufferfish, Spigot, **Folia 26.3+** | Purpur and other Paper forks run the Paper/Spigot path; native multi-threaded region scheduling on Folia |
 | **Minecraft Versions** | `1.21.10` – `26.3` | Folia: `1.21.11` – `26.3` |
-| **Build Tools** | Maven (`mvn`), Windows PowerShell | Tested on Windows / Linux environments |
+| **Build Tools** | Gradle wrapper (`./gradlew`), Windows PowerShell | Tested on Windows / Linux environments |
 
 ---
 
 ## Installation Steps
 
 1. **Download or Build Plugin**:
-   - Compile the project using Maven:
+   - Compile the project using the Gradle wrapper:
      ```bash
-     mvn clean package
+     ./gradlew clean build
      ```
-   - Locate `UltimateDonutSmp-1.4.1.jar` inside the `target/` directory.
+   - Locate `UltimateDonutSmp-1.4.1.jar` inside the `build/libs/` directory.
 
 2. **Place JAR File**:
    - Copy `UltimateDonutSmp-1.4.1.jar` into your server's `plugins/` directory.
