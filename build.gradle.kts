@@ -45,9 +45,10 @@ dependencies {
     provided(libs.floodgate.api)
     provided(libs.luckperms.api)
     provided(libs.voicechat.api)
+    // Spigot and Paper ship both JDBC drivers, and the plugin class loader prefers the server's copy anyway.
+    provided(libs.sqlite.jdbc)
+    provided(libs.mysql.connector.j)
 
-    implementation(libs.sqlite.jdbc)
-    implementation(libs.mysql.connector.j)
     implementation(libs.hikaricp)
     implementation(libs.mongodb.driver.sync)
     implementation(libs.jedis)

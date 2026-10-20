@@ -68,7 +68,7 @@ MONGODB:
 ```
 
 > [!TIP]
-> **SQLite** requires zero external setup and is bundled with a shaded JDBC driver. For multi-server BungeeCord/Velocity networks or Folia clusters, use **MySQL** or **MongoDB** to keep player balances, homes, stats, and inventories synchronized.
+> **SQLite** requires zero external setup and uses the JDBC driver that ships with Spigot and Paper. For multi-server BungeeCord/Velocity networks or Folia clusters, use **MySQL** or **MongoDB** to keep player balances, homes, stats, and inventories synchronized.
 
 ---
 

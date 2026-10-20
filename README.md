@@ -89,7 +89,7 @@ Gameplay clips:
 | Paper / Purpur / Pufferfish / Spigot | Minecraft `1.21.10` through `26.3` |
 | Folia | Minecraft `1.21.11` through `26.3` |
 | Hard dependencies | PlaceholderAPI and ProtocolLib (declared under `depend` in `plugin.yml`; the plugin will not load without them) |
-| Default storage | SQLite, bundled through the shaded JDBC driver |
+| Default storage | SQLite, using the JDBC driver that ships with Spigot and Paper |
 | Alternative storage | MySQL or MongoDB |
 | Optional network layer | Redis for cross-server staff chat, alerts, maintenance, reports, helpop, and server status |
 | Build environment | Internet access and a JDK 17 or newer to start the Gradle wrapper; it downloads Gradle 9.8.2 and, if missing, the JDK 25 compile toolchain (CI builds on JDK 25) |
