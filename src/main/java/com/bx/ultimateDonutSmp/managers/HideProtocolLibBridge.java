@@ -4,6 +4,7 @@ import com.bx.ultimateDonutSmp.UltimateDonutSmp;
 import com.bx.ultimateDonutSmp.models.HideMode;
 import com.bx.ultimateDonutSmp.models.HideState;
 import com.bx.ultimateDonutSmp.utils.ColorUtils;
+import com.bx.ultimateDonutSmp.utils.SpigotScheduler;
 import com.comphenix.protocol.PacketType;
 import com.comphenix.protocol.ProtocolLibrary;
 import com.comphenix.protocol.ProtocolManager;
@@ -21,6 +22,7 @@ import com.comphenix.protocol.wrappers.WrappedRemoteChatSessionData;
 import com.comphenix.protocol.wrappers.WrappedTeamParameters;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
+import org.bukkit.Location;
 import org.bukkit.entity.Display;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -565,23 +567,47 @@ final class HideProtocolLibBridge implements HidePacketBridge {
             stopNametagRideTask();
             return;
         }
+        SpigotScheduler scheduler = plugin.getSpigotScheduler();
         for (UUID targetUuid : Set.copyOf(nametagDisplays.keySet())) {
             Player target = Bukkit.getPlayer(targetUuid);
-            TextDisplay display = nametagDisplay(targetUuid);
-            if (target == null || !target.isOnline() || display == null) {
+            if (target == null || !target.isOnline()) {
                 continue;
             }
-            if (!display.getWorld().equals(target.getWorld())) {
-                removeNametagDisplay(targetUuid);
-                continue;
+            if (scheduler.isFolia()) {
+                // The global tick owns neither the player nor the display, so each pair is handled on
+                // the player's own region, the only place its position may be read.
+                scheduler.runEntity(target, () -> refreshNametagRide(targetUuid, target));
+            } else {
+                refreshNametagRide(targetUuid, target);
             }
-            if (display.getLocation().distanceSquared(target.getLocation()) > 0.0001D) {
-                display.teleport(target.getLocation());
-            }
-            for (Player viewer : Bukkit.getOnlinePlayers()) {
-                if (!viewer.getUniqueId().equals(targetUuid) && !hideManager.canSeeRealIdentity(viewer)) {
-                    sendNametagRide(viewer, target, display);
+        }
+    }
+
+    private void refreshNametagRide(UUID targetUuid, Player target) {
+        TextDisplay display = nametagDisplay(targetUuid);
+        if (!target.isOnline() || display == null) {
+            return;
+        }
+        if (!display.getWorld().equals(target.getWorld())) {
+            removeNametagDisplay(targetUuid);
+            return;
+        }
+        Location targetLocation = target.getLocation();
+        SpigotScheduler scheduler = plugin.getSpigotScheduler();
+        if (scheduler.isFolia()) {
+            // The display may sit across a region border from its player, so it is moved from its own.
+            scheduler.runEntity(display, () -> {
+                if (display.isValid() && display.getWorld().equals(targetLocation.getWorld())
+                        && display.getLocation().distanceSquared(targetLocation) > 0.0001D) {
+                    scheduler.teleport(display, targetLocation);
                 }
+            });
+        } else if (display.getLocation().distanceSquared(targetLocation) > 0.0001D) {
+            display.teleport(targetLocation);
+        }
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            if (!viewer.getUniqueId().equals(targetUuid) && !hideManager.canSeeRealIdentity(viewer)) {
+                sendNametagRide(viewer, target, display);
             }
         }
     }
