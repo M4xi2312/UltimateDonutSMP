@@ -55,6 +55,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class DatabaseManager {
 
@@ -5610,6 +5611,14 @@ public class DatabaseManager {
         flush();
         if (asyncExecutor != null && !asyncExecutor.isShutdown()) {
             asyncExecutor.shutdown();
+            // let queued saves finish before the connection goes away, or they are silently lost
+            try {
+                if (!asyncExecutor.awaitTermination(15, TimeUnit.SECONDS)) {
+                    plugin.getLogger().warning("Timed out waiting for pending database writes; some may be lost.");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
         try {
             if (connection != null && !connection.isClosed()) {
