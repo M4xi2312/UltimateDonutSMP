@@ -10,9 +10,18 @@ import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerQuitEvent;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -20,16 +29,17 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 
-public class BillfordManager {
+public class BillfordManager implements Listener {
 
     public record BillfordSlot(int slot, Material material, int quantity) {}
 
@@ -50,18 +60,37 @@ public class BillfordManager {
     private int currentTradeId;
     private long nextAdvanceMillis;
 
-    private final Map<UUID, Integer> playerTradeCounts = new HashMap<>();
-    private final Map<UUID, Long> lastClickTime = new HashMap<>();
+    private final Map<UUID, Integer> playerTradeCounts = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> lastClickTime = new ConcurrentHashMap<>();
     private final Set<UUID> processingTrades = new HashSet<>();
 
-    private File dataFile;
+    /** The newest state still waiting to reach disk; a writer always takes the latest one. */
+    private final AtomicReference<SavedState> pendingSave = new AtomicReference<>();
+    /** Keeps two writers from interleaving on the data file. */
+    private final Object saveLock = new Object();
+
+    private volatile File dataFile;
     private YamlConfiguration dataConfig;
+
+    /** What billford-data.yml holds, captured on the thread that changed it. */
+    record SavedState(int currentTradeId, long nextAdvanceMillis, Map<UUID, Integer> playerCounts) {
+
+        YamlConfiguration toYaml() {
+            YamlConfiguration yaml = new YamlConfiguration();
+            yaml.set("current-trade", currentTradeId);
+            yaml.set("next-advance-millis", nextAdvanceMillis);
+            playerCounts.forEach((uuid, count) -> yaml.set("player-counts." + uuid, count));
+            return yaml;
+        }
+    }
 
     public BillfordManager(UltimateDonutSmp plugin) {
         this.plugin = plugin;
     }
 
     public void load() {
+        // A trade made just before a reload must be on disk before the file is read back.
+        flushPendingSave();
         dataFile = new File(plugin.getDataFolder(), "billford-data.yml");
         dataConfig = dataFile.exists()
                 ? YamlConfiguration.loadConfiguration(dataFile)
@@ -182,18 +211,55 @@ public class BillfordManager {
         });
     }
 
+    /**
+     * Captures the state here and writes it off the main thread, since a trade click used to wait on
+     * the disk. Saves that pile up while one is being written collapse into a single write of the
+     * newest state.
+     */
     private void saveData() {
-        dataConfig.set("current-trade", currentTradeId);
-        dataConfig.set("next-advance-millis", nextAdvanceMillis);
-        dataConfig.set("player-counts", null);
-        playerTradeCounts.forEach((uuid, count) ->
-                dataConfig.set("player-counts." + uuid, count));
-
+        pendingSave.set(new SavedState(currentTradeId, nextAdvanceMillis, Map.copyOf(playerTradeCounts)));
         try {
-            dataConfig.save(dataFile);
-        } catch (IOException e) {
-            plugin.getLogger().log(Level.WARNING, "Failed to save billford-data.yml", e);
+            plugin.getSpigotScheduler().runAsync(this::flushPendingSave);
+        } catch (RuntimeException exception) {
+            // The scheduler refuses new work while the plugin is disabling, so write it here instead.
+            flushPendingSave();
         }
+    }
+
+    /** Writes whatever save is still pending, on the calling thread. */
+    public void flushPendingSave() {
+        synchronized (saveLock) {
+            SavedState state = pendingSave.getAndSet(null);
+            File target = dataFile;
+            if (state == null || target == null) {
+                return;
+            }
+            try {
+                writeAtomically(target.toPath(), state.toYaml().saveToString());
+            } catch (IOException e) {
+                plugin.getLogger().log(Level.WARNING, "Failed to save billford-data.yml", e);
+            }
+        }
+    }
+
+    /** Swaps the whole file in at once, so a reload never reads one half written. */
+    static void writeAtomically(Path target, String contents) throws IOException {
+        Path parent = target.toAbsolutePath().getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Path temp = target.resolveSibling(target.getFileName() + ".tmp");
+        Files.writeString(temp, contents, StandardCharsets.UTF_8);
+        try {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException exception) {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        lastClickTime.remove(event.getPlayer().getUniqueId());
     }
 
     public BillfordTrade getCurrentTrade() {

@@ -468,6 +468,9 @@ public final class UltimateDonutSmp extends JavaPlugin {
         if (offlineLocationManager != null) {
             offlineLocationManager.save();
         }
+        if (billfordManager != null) {
+            billfordManager.flushPendingSave();
+        }
 
         // Save all online players and close DB
         if (playerDataManager != null && !suppressWipeSaves) {
@@ -554,6 +557,7 @@ public final class UltimateDonutSmp extends JavaPlugin {
         pm.registerEvents(new CrateChestListener(this), this);
         pm.registerEvents(new EnderChestListener(this), this);
         pm.registerEvents(enderPearlManager, this);
+        pm.registerEvents(billfordManager, this);
         pm.registerEvents(new FreezeListener(this), this);
         pm.registerEvents(new StaffModeListener(this), this);
         pm.registerEvents(new InvseeListener(this), this);
