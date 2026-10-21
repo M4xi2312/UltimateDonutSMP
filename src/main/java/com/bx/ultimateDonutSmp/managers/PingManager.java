@@ -15,6 +15,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.geysermc.floodgate.api.FloodgateApi;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -83,7 +84,11 @@ public final class PingManager implements Listener {
                         if (elapsed >= 0 && elapsed < 10000) {
                             int ping = (int) elapsed;
                             pingCache.put(uuid, ping);
-                            setNmsLatency(player, ping);
+                            // Java players already get a smoothed latency from the server itself; replacing it
+                            // with this raw sample made a single delayed keep-alive show up as a ping spike
+                            if (isBedrockPlayer(player)) {
+                                setNmsLatency(player, ping);
+                            }
                         }
                     }
                 }
@@ -148,16 +153,34 @@ public final class PingManager implements Listener {
         }
 
         // 3. Check measured/cached ping
+        boolean bedrock = isBedrockPlayer(player);
         Integer cached = pingCache.get(uuid);
         if (cached != null && cached > 0) {
-            setNmsLatency(player, cached);
+            if (bedrock) {
+                setNmsLatency(player, cached);
+            }
             return cached;
         }
 
         // 4. Fallback ping (1ms) while initial calculation is pending
         int fallback = 1;
-        setNmsLatency(player, fallback);
+        if (bedrock) {
+            setNmsLatency(player, fallback);
+        }
         return fallback;
+    }
+
+    private boolean isBedrockPlayer(Player player) {
+        if (plugin.getServer().getPluginManager().isPluginEnabled("floodgate")) {
+            try {
+                if (FloodgateApi.getInstance().isFloodgatePlayer(player.getUniqueId())) {
+                    return true;
+                }
+            } catch (Throwable ignored) {
+                // Floodgate is installed but its API is unavailable; fall back to Geyser below
+            }
+        }
+        return getGeyserPing(player.getUniqueId()) >= 0;
     }
 
     /**
