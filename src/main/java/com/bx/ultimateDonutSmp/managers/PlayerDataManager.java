@@ -6,14 +6,15 @@ import com.bx.ultimateDonutSmp.utils.PlayerSettingDefaults;
 import org.bukkit.entity.Player;
 
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class PlayerDataManager {
 
     private final UltimateDonutSmp plugin;
-    private final Map<UUID, PlayerData> cache = new HashMap<>();
+    // Read from async threads (autosave, leaderboards) while joins and quits change it.
+    private final Map<UUID, PlayerData> cache = new ConcurrentHashMap<>();
 
     public PlayerDataManager(UltimateDonutSmp plugin) {
         this.plugin = plugin;
@@ -46,6 +47,9 @@ public class PlayerDataManager {
     }
 
     public void unload(UUID uuid) {
+        if (uuid == null) {
+            return;
+        }
         PlayerData data = cache.get(uuid);
         if (data != null) {
             data.commitSession();
@@ -62,11 +66,11 @@ public class PlayerDataManager {
     }
 
     public PlayerData get(UUID uuid) {
-        return cache.get(uuid);
+        return uuid == null ? null : cache.get(uuid);
     }
 
     public PlayerData get(Player player) {
-        return cache.get(player.getUniqueId());
+        return get(player.getUniqueId());
     }
 
     public Collection<PlayerData> getAll() {
@@ -78,6 +82,9 @@ public class PlayerDataManager {
      * writing the in-memory totals back would undo it before they have even noticed.
      */
     public void discardWithoutSaving(UUID uuid) {
+        if (uuid == null) {
+            return;
+        }
         cache.remove(uuid);
     }
 
@@ -86,7 +93,7 @@ public class PlayerDataManager {
     }
 
     public boolean isLoaded(UUID uuid) {
-        return cache.containsKey(uuid);
+        return uuid != null && cache.containsKey(uuid);
     }
 
     /** Re-pins options removed with ENABLED: false after menus.yml was reloaded. */

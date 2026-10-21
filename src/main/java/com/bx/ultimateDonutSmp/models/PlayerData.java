@@ -1,8 +1,20 @@
 package com.bx.ultimateDonutSmp.models;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.UUID;
 
 public class PlayerData {
+
+    private static final VarHandle DIRTY;
+
+    static {
+        try {
+            DIRTY = MethodHandles.lookup().findVarHandle(PlayerData.class, "dirty", boolean.class);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
 
     private final UUID uuid;
     private String username;
@@ -60,7 +72,8 @@ public class PlayerData {
     private boolean nightVisionEnabled;
     private long keyAllRemainingSeconds;
     private long keyAllAnchorPlaytimeSeconds;
-    private boolean dirty;
+    // Set from game threads and cleared by saves running on database threads.
+    private volatile boolean dirty;
 
     // New Settings
     private boolean destroyPearlOnDeath;
@@ -827,6 +840,15 @@ public class PlayerData {
 
     public void markDirty() {
         this.dirty = true;
+    }
+
+    /**
+     * Clears the flag and reports whether it was set. A save calls this before it reads any
+     * field, so a change that lands while the save runs marks the data dirty again instead of
+     * being wiped out together with the changes the save did capture.
+     */
+    public boolean clearDirty() {
+        return (boolean) DIRTY.getAndSet(this, false);
     }
 
     public void resetTrackedStats(long newSessionStartMillis) {

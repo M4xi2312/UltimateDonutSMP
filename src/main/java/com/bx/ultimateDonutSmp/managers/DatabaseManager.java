@@ -1675,6 +1675,7 @@ public class DatabaseManager {
                 bindPlayerSaveParameters(ps, data);
                 ps.executeUpdate();
             } catch (SQLException e) {
+                data.markDirty();
                 if (plugin != null) {
                     plugin.getLogger().log(Level.WARNING, "Failed to save player " + data.getUuid(), e);
                 }
@@ -1686,6 +1687,7 @@ public class DatabaseManager {
             bindPlayerSaveParameters(ps, data);
             ps.executeUpdate();
         } catch (SQLException e) {
+            data.markDirty();
             if (plugin != null) {
                 plugin.getLogger().log(Level.WARNING, "Failed to save player " + data.getUuid(), e);
             }
@@ -1693,6 +1695,9 @@ public class DatabaseManager {
     }
 
     private void bindPlayerSaveParameters(PreparedStatement ps, PlayerData data) throws SQLException {
+            // Clear before reading the fields: a change made while they are read sets the flag
+            // again and is picked up by the next save instead of being cleared with this one.
+            data.clearDirty();
             ps.setString(1, data.getUuid().toString());
             ps.setString(2, data.getUsername());
             ps.setDouble(3, data.getMoney());
@@ -1764,7 +1769,6 @@ public class DatabaseManager {
             ps.setInt(69, data.isShowDeathsLine() ? 1 : 0);
             ps.setInt(70, data.isShowPlaytimeLine() ? 1 : 0);
             ps.setInt(71, data.isCombatTimerEnabled() ? 1 : 0);
-            data.setDirty(false);
     }
 
     public int countPlayersWithTrackedStats() {
