@@ -64,8 +64,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 
 public class DuelManager {
@@ -143,6 +146,10 @@ public class DuelManager {
     private final Set<UUID> internalBypassTeleports = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private boolean crossServerSubscribed = false;
     private String crossServerSubscribedChannel = "";
+    /** Set while a cross-server queue scan is out on Redis, so a slow server never piles them up. */
+    private final AtomicBoolean crossServerMatchmakingInFlight = new AtomicBoolean(false);
+    private final Queue<Runnable> pendingDatabaseWrites = new ConcurrentLinkedQueue<>();
+    private final AtomicBoolean databaseWriteDrainScheduled = new AtomicBoolean(false);
     private long tickCounter = 0L;
 
     public DuelManager(UltimateDonutSmp plugin) {
@@ -1987,8 +1994,10 @@ public class DuelManager {
         DuelStats loserStats = getStats(loserUuid).recordLoss();
         statsCache.put(winnerUuid, winnerStats);
         statsCache.put(loserUuid, loserStats);
-        saveStats(winnerUuid, winnerStats);
-        saveStats(loserUuid, loserStats);
+        writeAsync(() -> {
+            saveStats(winnerUuid, winnerStats);
+            saveStats(loserUuid, loserStats);
+        });
     }
 
     private void updateStatsAfterDraw(UUID firstUuid, UUID secondUuid) {
@@ -1996,8 +2005,10 @@ public class DuelManager {
         DuelStats secondStats = getStats(secondUuid).recordDraw();
         statsCache.put(firstUuid, firstStats);
         statsCache.put(secondUuid, secondStats);
-        saveStats(firstUuid, firstStats);
-        saveStats(secondUuid, secondStats);
+        writeAsync(() -> {
+            saveStats(firstUuid, firstStats);
+            saveStats(secondUuid, secondStats);
+        });
     }
 
     private void storeLootClaimPackage(UUID winnerUuid, Player winner, long matchId, String defeatedName, List<ItemStack> loot) {
@@ -2548,15 +2559,64 @@ public class DuelManager {
         plugin.getRedisManager().del(getCrossQueueDataKey(uuid));
     }
 
+    /**
+     * Takes the matchmaking lock and reads the shared queue off the tick, since every one of those
+     * Redis round trips can wait out the full timeout, then pairs the entries back on the global
+     * thread. Only one scan is ever out at a time.
+     */
     private void attemptCrossServerMatchmaking() {
         if (!isCrossServerEnabled()) {
             return;
         }
-        if (!plugin.getRedisManager().setIfAbsent(getCrossLockKey(), getLocalServerId(), 3L)) {
+        if (!crossServerMatchmakingInFlight.compareAndSet(false, true)) {
             return;
         }
 
-        List<CrossQueueEntry> entries = loadCrossQueueEntries();
+        String lockKey = getCrossLockKey();
+        String localServerId = getLocalServerId();
+        try {
+            plugin.getSpigotScheduler().runAsync(() -> {
+                List<CrossQueueEntry> entries = List.of();
+                try {
+                    if (plugin.getRedisManager().setIfAbsent(lockKey, localServerId, 3L)) {
+                        entries = loadCrossQueueEntries();
+                    }
+                } catch (RuntimeException exception) {
+                    plugin.getLogger().log(Level.WARNING, "Failed to read the cross-server duel queue.", exception);
+                }
+                List<CrossQueueEntry> loaded = entries;
+                try {
+                    plugin.getSpigotScheduler().runGlobal(() -> {
+                        try {
+                            matchCrossQueueEntries(loaded);
+                        } finally {
+                            crossServerMatchmakingInFlight.set(false);
+                        }
+                    });
+                } catch (RuntimeException exception) {
+                    crossServerMatchmakingInFlight.set(false);
+                    throw exception;
+                }
+            });
+        } catch (RuntimeException exception) {
+            crossServerMatchmakingInFlight.set(false);
+            throw exception;
+        }
+    }
+
+    private void matchCrossQueueEntries(List<CrossQueueEntry> loadedEntries) {
+        if (!isCrossServerEnabled() || loadedEntries.size() < 2) {
+            return;
+        }
+
+        // The scan ran a moment ago; a local player who left the queue or was paired here since
+        // must not be offered to another server.
+        List<CrossQueueEntry> entries = new ArrayList<>();
+        for (CrossQueueEntry entry : loadedEntries) {
+            if (!entry.serverId().equals(getLocalServerId()) || queue.contains(entry.uuid())) {
+                entries.add(entry);
+            }
+        }
         if (entries.size() < 2) {
             return;
         }
@@ -4387,7 +4447,17 @@ public class DuelManager {
         }
 
         long endedAt = System.currentTimeMillis();
-        long durationSeconds = match.getStartedAt() <= 0L ? 0L : Math.max(0L, (endedAt - match.getStartedAt()) / 1000L);
+        long startedAt = match.getStartedAt();
+        long matchId = match.getId();
+        long durationSeconds = startedAt <= 0L ? 0L : Math.max(0L, (endedAt - startedAt) / 1000L);
+        writeAsync(() -> writeMatchRecord(matchId, winnerUuid, loserUuid, endReason, startedAt, endedAt, durationSeconds));
+    }
+
+    private void writeMatchRecord(long matchId, UUID winnerUuid, UUID loserUuid, String endReason,
+                                  long startedAt, long endedAt, long durationSeconds) {
+        if (connection() == null) {
+            return;
+        }
 
         try (PreparedStatement ps = connection().prepareStatement("""
                 UPDATE duel_matches
@@ -4406,13 +4476,48 @@ public class DuelManager {
             }
             ps.setString(3, DuelMatch.MatchStatus.FINISHED.name());
             ps.setString(4, endReason);
-            ps.setLong(5, match.getStartedAt());
+            ps.setLong(5, startedAt);
             ps.setLong(6, endedAt);
             ps.setLong(7, durationSeconds);
-            ps.setLong(8, match.getId());
+            ps.setLong(8, matchId);
             ps.executeUpdate();
         } catch (SQLException e) {
-            plugin.getLogger().log(Level.WARNING, "Failed to update duel match record " + match.getId(), e);
+            plugin.getLogger().log(Level.WARNING, "Failed to update duel match record " + matchId, e);
+        }
+    }
+
+    /**
+     * Runs a database write off the tick. Writes go out one after another in the order they were
+     * queued, even on a pooled database executor, so a later stats row can never be overwritten by
+     * an earlier one. Nothing that runs afterwards reads these rows back: the stats cache already
+     * holds the new values.
+     */
+    private void writeAsync(Runnable write) {
+        pendingDatabaseWrites.add(write);
+        scheduleDatabaseWriteDrain();
+    }
+
+    private void scheduleDatabaseWriteDrain() {
+        if (databaseWriteDrainScheduled.compareAndSet(false, true)) {
+            plugin.getDatabaseManager().executeAsync(this::drainDatabaseWrites);
+        }
+    }
+
+    private void drainDatabaseWrites() {
+        try {
+            Runnable write;
+            while ((write = pendingDatabaseWrites.poll()) != null) {
+                try {
+                    write.run();
+                } catch (RuntimeException exception) {
+                    plugin.getLogger().log(Level.WARNING, "Failed to write duel data", exception);
+                }
+            }
+        } finally {
+            databaseWriteDrainScheduled.set(false);
+            if (!pendingDatabaseWrites.isEmpty()) {
+                scheduleDatabaseWriteDrain();
+            }
         }
     }
 
