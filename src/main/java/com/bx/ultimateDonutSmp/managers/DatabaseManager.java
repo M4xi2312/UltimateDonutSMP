@@ -1989,12 +1989,36 @@ public class DatabaseManager {
             return true;
         }
 
-        int current = getCrateKeyAmount(uuid, crateId);
-        if (current < amount) {
+        if (connection == null || uuid == null || crateId == null || crateId.isBlank()) {
             return false;
         }
 
-        return setCrateKeyAmount(uuid, crateId, current - amount);
+        // Single conditional UPDATE so servers sharing the database cannot both spend the same keys.
+        try (PreparedStatement ps = connection.prepareStatement(
+                "UPDATE player_crate_keys SET amount = amount - ?, updated_at = ? "
+                        + "WHERE player_uuid = ? AND crate_id = ? AND amount >= ?")) {
+            ps.setInt(1, amount);
+            ps.setLong(2, System.currentTimeMillis());
+            ps.setString(3, uuid.toString());
+            ps.setString(4, crateId);
+            ps.setInt(5, amount);
+            if (ps.executeUpdate() == 0) {
+                return false;
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.WARNING, "Failed to remove crate keys for " + uuid + "/" + crateId, e);
+            return false;
+        }
+
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM player_crate_keys WHERE player_uuid = ? AND crate_id = ? AND amount <= 0")) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, crateId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.WARNING, "Failed to clean up empty crate key balance for " + uuid + "/" + crateId, e);
+        }
+        return true;
     }
 
     public record CrateBlockData(String world, int x, int y, int z, String crateId) {
