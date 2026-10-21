@@ -108,10 +108,13 @@ public class BountyManager {
         return "unknown";
     }
 
-    public PlacementResult placeBounty(Player placer, UUID targetUuid, double amount) {
+    public PlacementResult placeBounty(Player placer, UUID targetUuid, double requestedAmount) {
         if (placer.getUniqueId().equals(targetUuid)) {
             return PlacementResult.FAILED_SELF;
         }
+
+        // Round once so the stored bounty matches exactly what the economy withdraws.
+        double amount = roundToCents(requestedAmount);
 
         PlayerData placerData = plugin.getPlayerDataManager().get(placer);
         if (placerData == null || !plugin.getEconomyManager().has(placer, amount)) {
@@ -187,6 +190,11 @@ public class BountyManager {
         bounties.remove(targetUuid);
         plugin.getDatabaseManager().deleteBounty(targetUuid);
         return bounty.getAmount();
+    }
+
+    /** Same cent rounding the economy applies to every balance change. */
+    static double roundToCents(double amount) {
+        return Math.round(amount * 100D) / 100D;
     }
 
     public void removeBounty(UUID targetUuid) {
