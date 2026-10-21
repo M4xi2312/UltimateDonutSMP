@@ -16,7 +16,13 @@ import java.util.UUID;
 
 public class LeaderboardManager {
 
-    private static final long CACHE_TTL_MS = 2_000L;
+    // How long a board is served before it is rebuilt; LEADERBOARD.UPDATE in config.yml, in seconds.
+    static final long DEFAULT_CACHE_TTL_MS = 30_000L;
+    static final long MIN_CACHE_TTL_MS = 5_000L;
+    static final long MAX_CACHE_TTL_MS = 3_600_000L;
+    // An invalidated board is rebuilt at most this often, so a burst of balance changes costs one
+    // scan of the players table instead of one per change.
+    static final long STALE_REFRESH_INTERVAL_MS = 2_000L;
 
     public enum LeaderboardType {
         MONEY("money"),
@@ -52,8 +58,8 @@ public class LeaderboardManager {
             this(cachedAtMillis, players, false);
         }
 
-        private boolean needsRefresh(long now) {
-            return stale || now - cachedAtMillis >= CACHE_TTL_MS;
+        private boolean needsRefresh(long now, long ttlMillis) {
+            return now - cachedAtMillis >= (stale ? Math.min(STALE_REFRESH_INTERVAL_MS, ttlMillis) : ttlMillis);
         }
 
         private CachedLeaderboard markStale() {
@@ -63,13 +69,14 @@ public class LeaderboardManager {
 
     private final UltimateDonutSmp plugin;
     private final Map<LeaderboardType, CachedLeaderboard> leaderboardCache = new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.Set<LeaderboardType> refreshingTypes = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    // One rebuild covers every board from a single scan, and only one runs at a time.
+    private final java.util.concurrent.atomic.AtomicBoolean refreshRunning = new java.util.concurrent.atomic.AtomicBoolean();
+    // Set when a rebuild was forced while one was already running, which may have read old rows.
+    private final java.util.concurrent.atomic.AtomicBoolean refreshQueued = new java.util.concurrent.atomic.AtomicBoolean();
 
     public LeaderboardManager(UltimateDonutSmp plugin) {
         this.plugin = plugin;
-        for (LeaderboardType type : LeaderboardType.values()) {
-            triggerAsyncRefresh(type);
-        }
+        requestRefresh(false);
     }
 
     public Optional<LeaderboardType> parseType(String input) {
@@ -175,9 +182,7 @@ public class LeaderboardManager {
 
     public void invalidateAll() {
         leaderboardCache.replaceAll((key, cached) -> cached.markStale());
-        for (LeaderboardType type : LeaderboardType.values()) {
-            triggerAsyncRefresh(type);
-        }
+        requestRefresh(true);
     }
 
     private List<PlayerData> getSortedPlayers(LeaderboardType type) {
@@ -187,47 +192,97 @@ public class LeaderboardManager {
         long now = System.currentTimeMillis();
         CachedLeaderboard cachedLeaderboard = leaderboardCache.get(type);
         if (cachedLeaderboard == null) {
-            triggerAsyncRefresh(type);
+            requestRefresh(false);
             return List.of();
         }
 
-        if (cachedLeaderboard.needsRefresh(now)) {
-            triggerAsyncRefresh(type);
+        if (cachedLeaderboard.needsRefresh(now, cacheTtlMillis())) {
+            requestRefresh(false);
         }
         return cachedLeaderboard.players();
     }
 
+    long cacheTtlMillis() {
+        if (plugin == null || plugin.getConfigManager() == null || plugin.getConfigManager().getConfig() == null) {
+            return DEFAULT_CACHE_TTL_MS;
+        }
+        long seconds = plugin.getConfigManager().getConfig()
+                .getLong("LEADERBOARD.UPDATE", DEFAULT_CACHE_TTL_MS / 1000L);
+        return clampCacheTtl(Math.min(seconds, MAX_CACHE_TTL_MS / 1000L) * 1000L);
+    }
+
+    static long clampCacheTtl(long millis) {
+        return Math.max(MIN_CACHE_TTL_MS, Math.min(MAX_CACHE_TTL_MS, millis));
+    }
+
+    /** Rebuilds every board; kept for callers that ask for one type. */
     public void triggerAsyncRefresh(LeaderboardType type) {
-        if (type == null || !refreshingTypes.add(type)) {
+        if (type != null) {
+            requestRefresh(true);
+        }
+    }
+
+    /**
+     * Starts a rebuild unless one is running. A forced request made while one runs is remembered
+     * and rebuilds again afterwards, because the running scan may predate the change behind it;
+     * routine requests from reads are simply dropped, so busy menus cannot queue up scans.
+     */
+    private void requestRefresh(boolean force) {
+        if (force) {
+            refreshQueued.set(true);
+        }
+        if (!refreshRunning.compareAndSet(false, true)) {
             return;
         }
-        plugin.getDatabaseManager().executeAsync(() -> {
-            try {
-                Map<UUID, PlayerData> merged = new LinkedHashMap<>();
-                for (PlayerData stored : plugin.getDatabaseManager().loadAllPlayers()) {
-                    merged.put(stored.getUuid(), stored);
-                }
-                for (PlayerData live : plugin.getPlayerDataManager().getAll()) {
-                    merged.put(live.getUuid(), live);
-                }
+        refreshQueued.set(false);
+        plugin.getDatabaseManager().executeAsync(this::runRefresh);
+    }
 
-                List<PlayerData> players = new ArrayList<>(merged.values());
-                players.removeIf(data -> data == null || data.getUsername() == null || data.getUsername().isBlank());
-                if (type == LeaderboardType.BOUNTIES) {
-                    // Every player carries a zero bounty, so an unfiltered board would pad the
-                    // ranking with players nobody placed a bounty on.
-                    players.removeIf(data -> bountyAmount(data) <= 0D);
-                }
-                players.sort(comparator(type));
+    private void runRefresh() {
+        try {
+            do {
+                refreshQueued.set(false);
+                refreshAll();
+            } while (refreshQueued.get());
+        } finally {
+            refreshRunning.set(false);
+        }
+        // A forced request that arrived between the last check and the reset above.
+        if (refreshQueued.get()) {
+            requestRefresh(true);
+        }
+    }
 
-                List<PlayerData> snapshot = List.copyOf(players);
-                leaderboardCache.put(type, new CachedLeaderboard(System.currentTimeMillis(), snapshot));
-            } catch (Exception e) {
-                plugin.getLogger().warning("Failed to update leaderboard cache for " + type.name() + ": " + e.getMessage());
-            } finally {
-                refreshingTypes.remove(type);
+    private void refreshAll() {
+        try {
+            Map<UUID, PlayerData> merged = new LinkedHashMap<>();
+            for (PlayerData stored : plugin.getDatabaseManager().loadAllPlayers()) {
+                merged.put(stored.getUuid(), stored);
             }
-        });
+            for (PlayerData live : plugin.getPlayerDataManager().getAll()) {
+                merged.put(live.getUuid(), live);
+            }
+
+            List<PlayerData> players = new ArrayList<>(merged.values());
+            players.removeIf(data -> data == null || data.getUsername() == null || data.getUsername().isBlank());
+            long now = System.currentTimeMillis();
+            for (LeaderboardType type : LeaderboardType.values()) {
+                leaderboardCache.put(type, new CachedLeaderboard(now, sortedFor(type, players)));
+            }
+        } catch (Exception e) {
+            plugin.getLogger().warning("Failed to update leaderboard cache: " + e.getMessage());
+        }
+    }
+
+    private List<PlayerData> sortedFor(LeaderboardType type, List<PlayerData> players) {
+        List<PlayerData> sorted = new ArrayList<>(players);
+        if (type == LeaderboardType.BOUNTIES) {
+            // Every player carries a zero bounty, so an unfiltered board would pad the
+            // ranking with players nobody placed a bounty on.
+            sorted.removeIf(data -> bountyAmount(data) <= 0D);
+        }
+        sorted.sort(comparator(type));
+        return List.copyOf(sorted);
     }
 
     private Comparator<PlayerData> comparator(LeaderboardType type) {
