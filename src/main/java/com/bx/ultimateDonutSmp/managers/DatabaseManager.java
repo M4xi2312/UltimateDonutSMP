@@ -5248,7 +5248,24 @@ public class DatabaseManager {
     }
 
     private String toSqlLiteral(Object value) {
+        return toSqlLiteral(value, isMySql());
+    }
+
+    /**
+     * Renders a value as a literal for the backup dump, which is written in the dialect of the
+     * source database (SQLite or MySQL). Strings containing a backslash or a control character are
+     * emitted as UTF-8 hex decoded back to text, so they stay intact whatever the importing side's
+     * escape rules are (MySQL treats {@code \} as an escape unless NO_BACKSLASH_ESCAPES is set,
+     * SQLite never does, and neither accepts a raw NUL inside a statement).
+     */
+    static String toSqlLiteral(Object value, boolean mySql) {
         if (value == null) {
+            return "NULL";
+        }
+        if (value instanceof Double doubleValue && !Double.isFinite(doubleValue)) {
+            return "NULL";
+        }
+        if (value instanceof Float floatValue && !Float.isFinite(floatValue)) {
             return "NULL";
         }
         if (value instanceof Number) {
@@ -5258,13 +5275,34 @@ public class DatabaseManager {
             return booleanValue ? "1" : "0";
         }
         if (value instanceof byte[] bytes) {
-            StringBuilder hex = new StringBuilder(bytes.length * 2);
-            for (byte current : bytes) {
-                hex.append(String.format("%02x", current & 0xff));
-            }
-            return "X'" + hex + "'";
+            return toHexLiteral(bytes);
         }
-        return "'" + String.valueOf(value).replace("'", "''") + "'";
+        String text = String.valueOf(value);
+        if (needsHexEncoding(text)) {
+            String hex = toHexLiteral(text.getBytes(StandardCharsets.UTF_8));
+            return mySql ? "CONVERT(" + hex + " USING utf8mb4)" : "CAST(" + hex + " AS TEXT)";
+        }
+        return "'" + text.replace("'", "''") + "'";
+    }
+
+    private static boolean needsHexEncoding(String text) {
+        for (int index = 0; index < text.length(); index++) {
+            char current = text.charAt(index);
+            if (current == '\\' || current < 0x20 || current == 0x7f) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String toHexLiteral(byte[] bytes) {
+        StringBuilder hex = new StringBuilder(bytes.length * 2 + 3);
+        hex.append("X'");
+        for (byte current : bytes) {
+            hex.append(Character.forDigit((current >> 4) & 0xf, 16));
+            hex.append(Character.forDigit(current & 0xf, 16));
+        }
+        return hex.append('\'').toString();
     }
 
     private String serializeItemStack(ItemStack item) {
