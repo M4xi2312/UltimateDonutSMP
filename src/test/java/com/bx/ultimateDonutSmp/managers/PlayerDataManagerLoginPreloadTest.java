@@ -70,6 +70,14 @@ class PlayerDataManagerLoginPreloadTest {
     }
 
     @Test
+    void offlineBalanceChangeAfterThePreloadMakesTheJoinReadItAgain() {
+        players.preload(uuid);
+        assertTrue(database.addPlayerMoney(uuid, 50D));
+
+        assertEquals(150D, players.loadOrCreate(player()).getMoney());
+    }
+
+    @Test
     void secondLoginWhileStillLoadedDoesNotOverwriteUnsavedChanges() {
         PlayerData live = players.loadOrCreate(player());
         live.setMoney(777D);

@@ -26,10 +26,26 @@ public class EconomyManager {
     private record LoadedAccount(AccountReference reference, PlayerData data) {
     }
 
+    private static final int ACCOUNT_LOCK_STRIPES = 64;
+
     private final UltimateDonutSmp plugin;
+    // Balance changes arrive from region threads and async Vault callers, so every
+    // read-modify-write of one account holds that account's lock from read to write.
+    private final Object[] accountLocks = new Object[ACCOUNT_LOCK_STRIPES];
 
     public EconomyManager(UltimateDonutSmp plugin) {
         this.plugin = plugin;
+        for (int i = 0; i < accountLocks.length; i++) {
+            accountLocks[i] = new Object();
+        }
+    }
+
+    private int lockStripe(UUID uuid) {
+        return Math.floorMod(uuid.hashCode(), ACCOUNT_LOCK_STRIPES);
+    }
+
+    private Object accountLock(UUID uuid) {
+        return accountLocks[lockStripe(uuid)];
     }
 
     public AccountReference resolveAccount(String input) {
@@ -94,16 +110,18 @@ public class EconomyManager {
     }
 
     public boolean createPlayerAccount(OfflinePlayer player) {
-        if (player == null) {
+        if (player == null || player.getUniqueId() == null) {
             return false;
         }
 
-        LoadedAccount existing = loadAccount(player.getUniqueId(), player.getName(), false);
-        if (existing != null) {
-            return true;
-        }
+        synchronized (accountLock(player.getUniqueId())) {
+            LoadedAccount existing = loadAccount(player.getUniqueId(), player.getName(), false);
+            if (existing != null) {
+                return true;
+            }
 
-        return loadAccount(player.getUniqueId(), player.getName(), true) != null;
+            return loadAccount(player.getUniqueId(), player.getName(), true) != null;
+        }
     }
 
     public double getBalance(Player player) {
@@ -260,6 +278,24 @@ public class EconomyManager {
             );
         }
 
+        // Both locks, always taken in stripe order, so two opposite transfers cannot deadlock.
+        int firstStripe = Math.min(lockStripe(senderUuid), lockStripe(recipientUuid));
+        int secondStripe = Math.max(lockStripe(senderUuid), lockStripe(recipientUuid));
+        synchronized (accountLocks[firstStripe]) {
+            synchronized (accountLocks[secondStripe]) {
+                return transferLocked(senderUuid, senderName, recipientUuid, recipientName, amount, reason);
+            }
+        }
+    }
+
+    private EconomyTransferResult transferLocked(
+            UUID senderUuid,
+            String senderName,
+            UUID recipientUuid,
+            String recipientName,
+            double amount,
+            EconomyReason reason
+    ) {
         LoadedAccount sender = loadAccount(senderUuid, senderName, false);
         LoadedAccount recipient = loadAccount(recipientUuid, recipientName, false);
         if (sender == null || recipient == null) {
@@ -289,11 +325,30 @@ public class EconomyManager {
         }
 
         double recipientBefore = roundCurrency(recipient.data().getMoney());
-        sender.data().setMoney(roundCurrency(senderBefore - normalizedAmount));
-        recipient.data().setMoney(roundCurrency(recipientBefore + normalizedAmount));
-
-        saveLoadedAccount(sender);
-        saveLoadedAccount(recipient);
+        if (!commitChange(sender, senderBefore, -normalizedAmount)) {
+            return transferFailure(
+                    EconomyFailureReason.INSUFFICIENT_FUNDS,
+                    reason,
+                    sender.reference().uuid(),
+                    sender.reference().displayName(),
+                    recipient.reference().uuid(),
+                    recipient.reference().displayName(),
+                    normalizedAmount
+            );
+        }
+        if (!commitChange(recipient, recipientBefore, normalizedAmount)) {
+            // The recipient's row could not be credited, so hand the money back.
+            commitChange(sender, roundCurrency(sender.data().getMoney()), normalizedAmount);
+            return transferFailure(
+                    EconomyFailureReason.NO_PLAYER_DATA,
+                    reason,
+                    sender.reference().uuid(),
+                    sender.reference().displayName(),
+                    recipient.reference().uuid(),
+                    recipient.reference().displayName(),
+                    normalizedAmount
+            );
+        }
 
         String sName = senderName != null ? senderName : sender.reference().displayName();
         String rName = recipientName != null ? recipientName : recipient.reference().displayName();
@@ -339,6 +394,21 @@ public class EconomyManager {
             return failure(EconomyFailureReason.INVALID_AMOUNT, reason, uuid, displayNameHint, amount, 0D, 0D);
         }
 
+        if (uuid == null) {
+            return failure(EconomyFailureReason.NO_PLAYER_DATA, reason, null, displayNameHint, amount, 0D, 0D);
+        }
+        synchronized (accountLock(uuid)) {
+            return depositLocked(uuid, displayNameHint, amount, reason, createIfMissing);
+        }
+    }
+
+    private EconomyTransactionResult depositLocked(
+            UUID uuid,
+            String displayNameHint,
+            double amount,
+            EconomyReason reason,
+            boolean createIfMissing
+    ) {
         LoadedAccount loadedAccount = loadAccount(uuid, displayNameHint, createIfMissing);
         if (loadedAccount == null) {
             return failure(EconomyFailureReason.NO_PLAYER_DATA, reason, uuid, displayNameHint, amount, 0D, 0D);
@@ -346,8 +416,17 @@ public class EconomyManager {
 
         double normalizedAmount = roundCurrency(amount);
         double beforeBalance = roundCurrency(loadedAccount.data().getMoney());
-        loadedAccount.data().setMoney(roundCurrency(beforeBalance + normalizedAmount));
-        saveLoadedAccount(loadedAccount);
+        if (!commitChange(loadedAccount, beforeBalance, normalizedAmount)) {
+            return failure(
+                    EconomyFailureReason.NO_PLAYER_DATA,
+                    reason,
+                    uuid,
+                    loadedAccount.reference().displayName(),
+                    normalizedAmount,
+                    beforeBalance,
+                    beforeBalance
+            );
+        }
 
         if (reason == EconomyReason.ADMIN_ADD) {
             plugin.getPlayerLogsManager().log(
@@ -381,6 +460,20 @@ public class EconomyManager {
             return failure(EconomyFailureReason.INVALID_AMOUNT, reason, uuid, displayNameHint, amount, 0D, 0D);
         }
 
+        if (uuid == null) {
+            return failure(EconomyFailureReason.NO_PLAYER_DATA, reason, null, displayNameHint, amount, 0D, 0D);
+        }
+        synchronized (accountLock(uuid)) {
+            return withdrawLocked(uuid, displayNameHint, amount, reason);
+        }
+    }
+
+    private EconomyTransactionResult withdrawLocked(
+            UUID uuid,
+            String displayNameHint,
+            double amount,
+            EconomyReason reason
+    ) {
         LoadedAccount loadedAccount = loadAccount(uuid, displayNameHint, false);
         if (loadedAccount == null) {
             return failure(EconomyFailureReason.NO_PLAYER_DATA, reason, uuid, displayNameHint, amount, 0D, 0D);
@@ -388,7 +481,8 @@ public class EconomyManager {
 
         double normalizedAmount = roundCurrency(amount);
         double beforeBalance = roundCurrency(loadedAccount.data().getMoney());
-        if (beforeBalance + EPSILON < normalizedAmount) {
+        if (beforeBalance + EPSILON < normalizedAmount
+                || !commitChange(loadedAccount, beforeBalance, -normalizedAmount)) {
             return failure(
                     EconomyFailureReason.INSUFFICIENT_FUNDS,
                     reason,
@@ -399,9 +493,6 @@ public class EconomyManager {
                     beforeBalance
             );
         }
-
-        loadedAccount.data().setMoney(roundCurrency(beforeBalance - normalizedAmount));
-        saveLoadedAccount(loadedAccount);
 
         if (reason == EconomyReason.ADMIN_REMOVE) {
             plugin.getPlayerLogsManager().log(
@@ -435,6 +526,20 @@ public class EconomyManager {
             return failure(EconomyFailureReason.INVALID_AMOUNT, reason, uuid, displayNameHint, amount, 0D, 0D);
         }
 
+        if (uuid == null) {
+            return failure(EconomyFailureReason.NO_PLAYER_DATA, reason, null, displayNameHint, amount, 0D, 0D);
+        }
+        synchronized (accountLock(uuid)) {
+            return setBalanceLocked(uuid, displayNameHint, amount, reason);
+        }
+    }
+
+    private EconomyTransactionResult setBalanceLocked(
+            UUID uuid,
+            String displayNameHint,
+            double amount,
+            EconomyReason reason
+    ) {
         LoadedAccount loadedAccount = loadAccount(uuid, displayNameHint, false);
         if (loadedAccount == null) {
             return failure(EconomyFailureReason.NO_PLAYER_DATA, reason, uuid, displayNameHint, amount, 0D, 0D);
@@ -442,8 +547,20 @@ public class EconomyManager {
 
         double normalizedAmount = roundCurrency(amount);
         double beforeBalance = roundCurrency(loadedAccount.data().getMoney());
+        if (!loadedAccount.reference().isOnline()
+                && !plugin.getDatabaseManager().setPlayerMoney(uuid, normalizedAmount)) {
+            return failure(
+                    EconomyFailureReason.NO_PLAYER_DATA,
+                    reason,
+                    uuid,
+                    loadedAccount.reference().displayName(),
+                    normalizedAmount,
+                    beforeBalance,
+                    beforeBalance
+            );
+        }
         loadedAccount.data().setMoney(normalizedAmount);
-        saveLoadedAccount(loadedAccount);
+        invalidateMoneyLeaderboard();
 
         if (reason == EconomyReason.ADMIN_SET) {
             plugin.getPlayerLogsManager().log(
@@ -511,16 +628,32 @@ public class EconomyManager {
         );
     }
 
-    private void saveLoadedAccount(LoadedAccount loadedAccount) {
-        if (loadedAccount.reference().isOnline()) {
-            if (plugin.getLeaderboardManager() != null) {
-                plugin.getLeaderboardManager().invalidate(LeaderboardManager.LeaderboardType.MONEY);
+    /**
+     * Applies a balance change while the caller holds the account's lock. An online account
+     * changes in memory and is saved with the rest of the player's data. An offline account
+     * changes only its stored balance, in one statement, so neither another change to the same
+     * account nor a save of the player's other columns can overwrite it. Writing the whole
+     * loaded row back later, as this used to, let the second of two quick deposits erase the
+     * first. An offline withdrawal fails when the stored balance no longer covers it.
+     */
+    private boolean commitChange(LoadedAccount account, double beforeBalance, double delta) {
+        if (!account.reference().isOnline()) {
+            UUID uuid = account.reference().uuid();
+            boolean stored = delta >= 0D
+                    ? plugin.getDatabaseManager().addPlayerMoney(uuid, delta)
+                    : plugin.getDatabaseManager().withdrawPlayerMoneyIfAvailable(uuid, -delta);
+            if (!stored) {
+                return false;
             }
-        } else {
-            plugin.getDatabaseManager().savePlayerAsync(loadedAccount.data());
-            if (plugin.getLeaderboardManager() != null) {
-                plugin.getLeaderboardManager().invalidate(LeaderboardManager.LeaderboardType.MONEY);
-            }
+        }
+        account.data().setMoney(roundCurrency(beforeBalance + delta));
+        invalidateMoneyLeaderboard();
+        return true;
+    }
+
+    private void invalidateMoneyLeaderboard() {
+        if (plugin.getLeaderboardManager() != null) {
+            plugin.getLeaderboardManager().invalidate(LeaderboardManager.LeaderboardType.MONEY);
         }
     }
 

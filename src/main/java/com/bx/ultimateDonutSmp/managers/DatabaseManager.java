@@ -6039,4 +6039,61 @@ public class DatabaseManager {
             }
         }
     }
+
+    /**
+     * Adds {@code amount} to a stored balance in a single statement, so two changes to the same
+     * offline account cannot overwrite each other. Returns false when no row was changed.
+     */
+    public synchronized boolean addPlayerMoney(UUID uuid, double amount) {
+        return updatePlayerMoney(uuid,
+                "UPDATE players SET money = ROUND(money + ?, 2) WHERE uuid = ?",
+                List.of(amount, uuid));
+    }
+
+    /**
+     * Takes {@code amount} from a stored balance in a single statement, but only while the balance
+     * still covers it. Returns false when the row is missing or the balance is too low.
+     */
+    public synchronized boolean withdrawPlayerMoneyIfAvailable(UUID uuid, double amount) {
+        return updatePlayerMoney(uuid,
+                "UPDATE players SET money = CASE WHEN money - ? < 0 THEN 0 ELSE ROUND(money - ?, 2) END"
+                        + " WHERE uuid = ? AND money + 0.0000001 >= ?",
+                List.of(amount, amount, uuid, amount));
+    }
+
+    /** Overwrites only the stored balance, leaving the rest of the row as it is. */
+    public synchronized boolean setPlayerMoney(UUID uuid, double amount) {
+        return updatePlayerMoney(uuid,
+                "UPDATE players SET money = ? WHERE uuid = ?",
+                List.of(amount, uuid));
+    }
+
+    private boolean updatePlayerMoney(UUID uuid, String sql, List<Object> parameters) {
+        if (uuid == null) {
+            return false;
+        }
+        int changed = 0;
+        try {
+            if (hikariDataSource != null && !hikariDataSource.isClosed()) {
+                try (Connection conn = hikariDataSource.getConnection();
+                     PreparedStatement ps = conn.prepareStatement(sql)) {
+                    bindParameters(ps, parameters);
+                    changed = ps.executeUpdate();
+                }
+            } else {
+                try (PreparedStatement ps = connection.prepareStatement(sql)) {
+                    bindParameters(ps, parameters);
+                    changed = ps.executeUpdate();
+                }
+            }
+        } catch (SQLException e) {
+            if (plugin != null) {
+                plugin.getLogger().log(Level.WARNING, "Failed to update balance of " + uuid, e);
+            }
+        }
+        if (changed > 0) {
+            notifyPlayerRowWritten(uuid);
+        }
+        return changed > 0;
+    }
 }
