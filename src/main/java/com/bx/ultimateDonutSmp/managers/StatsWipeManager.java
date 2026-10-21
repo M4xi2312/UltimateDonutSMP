@@ -190,6 +190,8 @@ public class StatsWipeManager {
     }
 
     private void persistLivePlayerData() {
+        // Rows of players still logging in were read before this wipe; let their join reload them.
+        plugin.getPlayerDataManager().discardLoginPreloads();
         for (PlayerData data : plugin.getPlayerDataManager().getAll()) {
             plugin.getDatabaseManager().savePlayer(data);
         }

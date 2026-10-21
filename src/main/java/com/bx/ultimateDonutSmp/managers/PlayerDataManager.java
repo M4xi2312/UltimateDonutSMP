@@ -2,6 +2,7 @@ package com.bx.ultimateDonutSmp.managers;
 
 import com.bx.ultimateDonutSmp.UltimateDonutSmp;
 import com.bx.ultimateDonutSmp.models.PlayerData;
+import com.bx.ultimateDonutSmp.utils.LoginPreloadCache;
 import com.bx.ultimateDonutSmp.utils.PlayerSettingDefaults;
 import org.bukkit.entity.Player;
 
@@ -15,9 +16,42 @@ public class PlayerDataManager {
     private final UltimateDonutSmp plugin;
     // Read from async threads (autosave, leaderboards) while joins and quits change it.
     private final Map<UUID, PlayerData> cache = new ConcurrentHashMap<>();
+    private final LoginPreloadCache<PlayerData> loginPreloads = new LoginPreloadCache<>();
 
     public PlayerDataManager(UltimateDonutSmp plugin) {
         this.plugin = plugin;
+        if (plugin != null && plugin.getDatabaseManager() != null) {
+            plugin.getDatabaseManager().setPlayerRowWriteListener(this::discardLoginPreload);
+        }
+    }
+
+    /**
+     * Reads a joining player's row while the login is still off the main thread, so
+     * {@link #loadOrCreate} can skip the query. Any later write to the row discards the result
+     * again (see {@link DatabaseManager#setPlayerRowWriteListener}), and so does a quit, so the
+     * join never starts from a copy older than what is stored.
+     */
+    public void preload(UUID uuid) {
+        if (uuid == null) {
+            return;
+        }
+        LoginPreloadCache.Ticket<PlayerData> ticket = loginPreloads.begin(uuid);
+        if (cache.containsKey(uuid)) {
+            // Still loaded from a session whose quit has not run yet; its unsaved changes are
+            // newer than the row, so the join has to read the row after that quit saved it.
+            loginPreloads.cancel(uuid, ticket);
+            return;
+        }
+        loginPreloads.complete(ticket, plugin.getDatabaseManager().loadPlayer(uuid));
+    }
+
+    /** Drops a preload that will not be used, for example because the login was refused. */
+    public void discardLoginPreload(UUID uuid) {
+        loginPreloads.invalidate(uuid);
+    }
+
+    public void discardLoginPreloads() {
+        loginPreloads.clear();
     }
 
     public PlayerData loadOrCreate(Player player) {
@@ -29,7 +63,8 @@ public class PlayerDataManager {
             return data;
         }
 
-        data = plugin.getDatabaseManager().loadPlayer(uuid);
+        LoginPreloadCache.Preloaded<PlayerData> preloaded = loginPreloads.take(uuid);
+        data = preloaded != null ? preloaded.value() : plugin.getDatabaseManager().loadPlayer(uuid);
         if (data == null) {
             data = new PlayerData(uuid, player.getName());
             PlayerSettingDefaults.applyDefaults(plugin, data);
@@ -50,6 +85,7 @@ public class PlayerDataManager {
         if (uuid == null) {
             return;
         }
+        loginPreloads.invalidate(uuid);
         PlayerData data = cache.get(uuid);
         if (data != null) {
             data.commitSession();
@@ -85,10 +121,12 @@ public class PlayerDataManager {
         if (uuid == null) {
             return;
         }
+        loginPreloads.invalidate(uuid);
         cache.remove(uuid);
     }
 
     public void discardAllForServerWipe() {
+        loginPreloads.clear();
         cache.clear();
     }
 

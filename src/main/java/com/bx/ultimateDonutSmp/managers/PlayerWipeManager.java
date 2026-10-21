@@ -220,6 +220,7 @@ public class PlayerWipeManager {
     }
 
     private void clearCaches(UUID playerUuid) {
+        plugin.getPlayerDataManager().discardLoginPreload(playerUuid);
         plugin.getCrateManager().unloadKeyBalanceCache(playerUuid);
         plugin.getShopManager().cleanupPlayer(playerUuid);
         plugin.getHomeManager().unloadHomes(playerUuid);

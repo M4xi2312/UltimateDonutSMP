@@ -12,6 +12,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerLoginEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -21,6 +22,7 @@ import org.bukkit.Location;
 import org.bukkit.event.player.PlayerTeleportEvent;
 
 import java.util.UUID;
+import java.util.logging.Level;
 
 public class PlayerJoinQuitListener implements Listener {
 
@@ -56,21 +58,40 @@ public class PlayerJoinQuitListener implements Listener {
                 return;
             }
         }
+    }
+
+    /**
+     * A login refused after its data was preloaded never reaches the join that would claim it,
+     * so the preload is dropped here instead of waiting for it to expire.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onLoginResult(PlayerLoginEvent event) {
         if (event.getResult() != PlayerLoginEvent.Result.ALLOWED) {
+            discardJoinPreloads(event.getPlayer().getUniqueId());
+        }
+    }
+
+    /**
+     * Blacklist and ban lookups query the database, so they run here on the login thread
+     * instead of in {@link PlayerLoginEvent}, which the server fires on its main thread.
+     */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onPreLogin(AsyncPlayerPreLoginEvent event) {
+        if (event.getLoginResult() != AsyncPlayerPreLoginEvent.Result.ALLOWED) {
             return;
         }
 
-        UUID uuid = event.getPlayer().getUniqueId();
-        if (uuid == null) {
+        UUID uuid = event.getUniqueId();
+        if (uuid == null || plugin.getPunishmentManager() == null) {
             return;
         }
 
-        String playerName = event.getPlayer().getName();
+        String playerName = event.getName();
         PunishmentRecord blacklist = plugin.getPunishmentManager()
                 .getActiveRecord(uuid, playerName, PunishmentType.BLACKLIST)
                 .orElse(null);
         if (blacklist != null) {
-            event.disallow(PlayerLoginEvent.Result.KICK_BANNED, ColorUtils.colorize(kickMessage(blacklist)));
+            event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_BANNED, ColorUtils.colorize(kickMessage(blacklist)));
             return;
         }
 
@@ -78,8 +99,39 @@ public class PlayerJoinQuitListener implements Listener {
                 .getActiveRecord(uuid, playerName, PunishmentType.BAN)
                 .orElse(null);
         if (ban != null) {
-            event.disallow(PlayerLoginEvent.Result.KICK_BANNED, ColorUtils.colorize(kickMessage(ban)));
+            event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_BANNED, ColorUtils.colorize(kickMessage(ban)));
         }
+    }
+
+    /**
+     * Reads the player's stored data on the login thread once every plugin has let the login
+     * through, so the join handler finds it ready instead of querying on the main thread. A
+     * failed or skipped preload costs nothing: the join then loads the data itself.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPreLoginPreload(AsyncPlayerPreLoginEvent event) {
+        if (event.getLoginResult() != AsyncPlayerPreLoginEvent.Result.ALLOWED || event.getUniqueId() == null) {
+            return;
+        }
+        UUID uuid = event.getUniqueId();
+        try {
+            plugin.getPlayerDataManager().preload(uuid);
+            plugin.getHomeManager().preloadHomes(uuid);
+            plugin.getIgnoreManager().preloadPlayer(uuid);
+        } catch (RuntimeException e) {
+            discardJoinPreloads(uuid);
+            plugin.getLogger().log(Level.WARNING, "Could not preload data for " + event.getName()
+                    + "; it will be loaded on join instead.", e);
+        }
+    }
+
+    private void discardJoinPreloads(UUID uuid) {
+        if (uuid == null) {
+            return;
+        }
+        plugin.getPlayerDataManager().discardLoginPreload(uuid);
+        plugin.getHomeManager().discardLoginPreload(uuid);
+        plugin.getIgnoreManager().discardLoginPreload(uuid);
     }
 
     @EventHandler
@@ -143,8 +195,14 @@ public class PlayerJoinQuitListener implements Listener {
             }
         } else if (plugin.getMaintenanceManager() != null) {
             String localServerId = plugin.getConfigManager().getNetwork().getString("NETWORK.LOCAL_SERVER_ID", "local");
-            org.bukkit.Location savedLoc = plugin.getDatabaseManager().getMaintenanceLocation(player.getUniqueId(), localServerId);
-            if (savedLoc != null) {
+            UUID uuid = player.getUniqueId();
+            // Almost nobody has a saved location, so look it up off the main thread and only
+            // come back to the player's own scheduler when there is somewhere to send them.
+            plugin.getSpigotScheduler().runAsync(() -> {
+                org.bukkit.Location savedLoc = plugin.getDatabaseManager().getMaintenanceLocation(uuid, localServerId);
+                if (savedLoc == null) {
+                    return;
+                }
                 plugin.getSpigotScheduler().runEntityLater(player, () -> {
                     if (player.isOnline()) {
                         plugin.getSpigotScheduler().teleport(player, savedLoc).thenAccept(success -> {
@@ -156,7 +214,7 @@ public class PlayerJoinQuitListener implements Listener {
                         });
                     }
                 }, 1L);
-            }
+            });
         }
 
         plugin.getPlayerDataManager().loadOrCreate(player);

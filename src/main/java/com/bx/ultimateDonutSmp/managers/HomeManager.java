@@ -1,6 +1,7 @@
 package com.bx.ultimateDonutSmp.managers;
 
 import com.bx.ultimateDonutSmp.utils.LazyLocation;
+import com.bx.ultimateDonutSmp.utils.LoginPreloadCache;
 import com.bx.ultimateDonutSmp.utils.PermissionUtils;
 
 import com.bx.ultimateDonutSmp.UltimateDonutSmp;
@@ -27,13 +28,39 @@ public class HomeManager {
     /** UUID → list of homes */
     private final Map<UUID, List<Home>> cache = new HashMap<>();
     private final Map<UUID, PendingHomeInput> pendingInputs = new ConcurrentHashMap<>();
+    private final LoginPreloadCache<List<Home>> loginPreloads = new LoginPreloadCache<>();
 
     public HomeManager(UltimateDonutSmp plugin) {
         this.plugin = plugin;
     }
 
+    /**
+     * Reads a joining player's homes while the login is still off the main thread, so the
+     * {@link #loadHomes} call from the join can skip the query. Every home change for the player
+     * discards the result again, so the join never starts from an older list than is stored.
+     */
+    public void preloadHomes(UUID uuid) {
+        if (uuid == null) {
+            return;
+        }
+        LoginPreloadCache.Ticket<List<Home>> ticket = loginPreloads.begin(uuid);
+        List<Home> homes = plugin.getDatabaseManager().loadHomes(uuid);
+        if (homes == null) {
+            loginPreloads.cancel(uuid, ticket);
+            return;
+        }
+        loginPreloads.complete(ticket, homes);
+    }
+
+    public void discardLoginPreload(UUID uuid) {
+        loginPreloads.invalidate(uuid);
+    }
+
     public void loadHomes(Player player) {
-        List<Home> homes = plugin.getDatabaseManager().loadHomes(player.getUniqueId());
+        LoginPreloadCache.Preloaded<List<Home>> preloaded = loginPreloads.take(player.getUniqueId());
+        List<Home> homes = preloaded != null
+                ? preloaded.value()
+                : plugin.getDatabaseManager().loadHomes(player.getUniqueId());
         if (homes != null) {
             cache.put(player.getUniqueId(), homes);
         } else {
@@ -42,10 +69,12 @@ public class HomeManager {
     }
 
     public void unloadHomes(UUID uuid) {
+        loginPreloads.invalidate(uuid);
         cache.remove(uuid);
     }
 
     public void clearAllCaches() {
+        loginPreloads.clear();
         cache.clear();
         pendingInputs.clear();
     }
@@ -179,6 +208,7 @@ public class HomeManager {
             if (h.getName().equalsIgnoreCase(name)) {
                 h.setLocation(targetLocation);
                 plugin.getDatabaseManager().saveHome(h);
+                loginPreloads.invalidate(uuid);
                 return true;
             }
         }
@@ -188,6 +218,7 @@ public class HomeManager {
         Home home = new Home(uuid, name, targetLocation);
         homes.add(home);
         plugin.getDatabaseManager().saveHome(home);
+        loginPreloads.invalidate(uuid);
         return true;
     }
 
@@ -195,7 +226,10 @@ public class HomeManager {
         List<Home> homes = cache.get(uuid);
         if (homes == null) return false;
         boolean removed = homes.removeIf(h -> h.getName().equalsIgnoreCase(name));
-        if (removed) plugin.getDatabaseManager().deleteHome(uuid, name);
+        if (removed) {
+            plugin.getDatabaseManager().deleteHome(uuid, name);
+            loginPreloads.invalidate(uuid);
+        }
         return removed;
     }
 
@@ -207,6 +241,7 @@ public class HomeManager {
         plugin.getDatabaseManager().deleteHome(uuid, oldName);
         home.setName(newName);
         plugin.getDatabaseManager().saveHome(home);
+        loginPreloads.invalidate(uuid);
         return true;
     }
 

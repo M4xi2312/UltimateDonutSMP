@@ -1,5 +1,6 @@
 package com.bx.ultimateDonutSmp.managers;
 
+import com.bx.ultimateDonutSmp.utils.LoginPreloadCache;
 import com.bx.ultimateDonutSmp.utils.PermissionUtils;
 
 import com.bx.ultimateDonutSmp.UltimateDonutSmp;
@@ -29,25 +30,48 @@ public class IgnoreManager {
 
     private final UltimateDonutSmp plugin;
     private final Map<UUID, Map<UUID, IgnoreEntry>> ignoredByOwner = new ConcurrentHashMap<>();
+    private final LoginPreloadCache<Map<UUID, IgnoreEntry>> loginPreloads = new LoginPreloadCache<>();
 
     public IgnoreManager(UltimateDonutSmp plugin) {
         this.plugin = plugin;
+    }
+
+    /**
+     * Reads a joining player's ignore list while the login is still off the main thread, so the
+     * {@link #loadPlayer} call from the join can skip the query. Adding or removing an ignore for
+     * the player discards the result again, so the join never starts from an older list.
+     */
+    public void preloadPlayer(UUID ownerUuid) {
+        if (ownerUuid == null) {
+            return;
+        }
+        LoginPreloadCache.Ticket<Map<UUID, IgnoreEntry>> ticket = loginPreloads.begin(ownerUuid);
+        loginPreloads.complete(ticket, loadIgnoreMap(ownerUuid));
+    }
+
+    public void discardLoginPreload(UUID ownerUuid) {
+        loginPreloads.invalidate(ownerUuid);
     }
 
     public void loadPlayer(UUID ownerUuid) {
         if (ownerUuid == null) {
             return;
         }
-        ignoredByOwner.put(ownerUuid, loadIgnoreMap(ownerUuid));
+        LoginPreloadCache.Preloaded<Map<UUID, IgnoreEntry>> preloaded = loginPreloads.take(ownerUuid);
+        ignoredByOwner.put(ownerUuid, preloaded != null && preloaded.value() != null
+                ? preloaded.value()
+                : loadIgnoreMap(ownerUuid));
     }
 
     public void unloadPlayer(UUID ownerUuid) {
         if (ownerUuid != null) {
+            loginPreloads.invalidate(ownerUuid);
             ignoredByOwner.remove(ownerUuid);
         }
     }
 
     public void clear() {
+        loginPreloads.clear();
         ignoredByOwner.clear();
     }
 
@@ -88,6 +112,7 @@ public class IgnoreManager {
         if (!saved) {
             return false;
         }
+        loginPreloads.invalidate(entry.ownerUuid());
 
         getOrLoad(entry.ownerUuid()).put(entry.ignoredUuid(), entry);
         return true;
@@ -102,6 +127,7 @@ public class IgnoreManager {
         if (!removed) {
             return false;
         }
+        loginPreloads.invalidate(ownerUuid);
 
         getOrLoad(ownerUuid).remove(ignoredUuid);
         return true;

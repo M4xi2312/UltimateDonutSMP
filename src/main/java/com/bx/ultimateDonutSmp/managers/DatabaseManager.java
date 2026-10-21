@@ -1680,6 +1680,7 @@ public class DatabaseManager {
                     plugin.getLogger().log(Level.WARNING, "Failed to save player " + data.getUuid(), e);
                 }
             }
+            notifyPlayerRowWritten(data.getUuid());
             return;
         }
 
@@ -1692,6 +1693,7 @@ public class DatabaseManager {
                 plugin.getLogger().log(Level.WARNING, "Failed to save player " + data.getUuid(), e);
             }
         }
+        notifyPlayerRowWritten(data.getUuid());
     }
 
     private void bindPlayerSaveParameters(PreparedStatement ps, PlayerData data) throws SQLException {
@@ -6010,6 +6012,30 @@ public class DatabaseManager {
                     }
                     throw e.getCause();
                 }
+            }
+        }
+    }
+
+    private volatile java.util.function.Consumer<UUID> playerRowWriteListener;
+
+    /**
+     * Registers a callback that receives a player's UUID after this class wrote that player's
+     * row, so data read for the player earlier (a login preload) can be thrown away.
+     */
+    public void setPlayerRowWriteListener(java.util.function.Consumer<UUID> listener) {
+        this.playerRowWriteListener = listener;
+    }
+
+    private void notifyPlayerRowWritten(UUID uuid) {
+        java.util.function.Consumer<UUID> listener = playerRowWriteListener;
+        if (listener == null || uuid == null) {
+            return;
+        }
+        try {
+            listener.accept(uuid);
+        } catch (RuntimeException e) {
+            if (plugin != null) {
+                plugin.getLogger().log(Level.WARNING, "Player row write listener failed for " + uuid, e);
             }
         }
     }
