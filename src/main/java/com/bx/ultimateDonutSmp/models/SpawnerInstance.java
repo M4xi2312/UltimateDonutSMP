@@ -49,6 +49,8 @@ public class SpawnerInstance {
     private final long createdAt;
     private long updatedAt;
     private double storedXp;
+    // generation fills this from the spawner's region thread while storage menus edit it from
+    // each viewer's thread, so every method touching it holds this instance's lock
     private final Map<String, SpawnerLootEntry> storedLoot = new LinkedHashMap<>();
     private final Set<String> disabledLootKeys = new LinkedHashSet<>();
 
@@ -181,18 +183,18 @@ public class SpawnerInstance {
         this.updatedAt = Math.max(0L, updatedAt);
     }
 
-    public List<SpawnerLootEntry> getStoredLootEntries() {
+    public synchronized List<SpawnerLootEntry> getStoredLootEntries() {
         return new ArrayList<>(storedLoot.values());
     }
 
-    public SpawnerLootEntry getStoredLoot(String key) {
+    public synchronized SpawnerLootEntry getStoredLoot(String key) {
         if (key == null) {
             return null;
         }
         return storedLoot.get(key.toUpperCase(Locale.US));
     }
 
-    public void setStoredLootEntries(Collection<SpawnerLootEntry> entries) {
+    public synchronized void setStoredLootEntries(Collection<SpawnerLootEntry> entries) {
         storedLoot.clear();
         if (entries == null) {
             return;
@@ -206,7 +208,7 @@ public class SpawnerInstance {
         }
     }
 
-    public void setSlotLoot(int slotIndex, Material material, long amount) {
+    public synchronized void setSlotLoot(int slotIndex, Material material, long amount) {
         if (slotIndex < 0) {
             return;
         }
@@ -218,15 +220,65 @@ public class SpawnerInstance {
         storedLoot.put(key, new SpawnerLootEntry(key, material, amount));
     }
 
-    public SpawnerLootEntry getSlotLoot(int slotIndex) {
+    public synchronized SpawnerLootEntry getSlotLoot(int slotIndex) {
         return storedLoot.get("SLOT_" + slotIndex);
     }
 
-    public void removeSlotLoot(int slotIndex) {
+    public synchronized void removeSlotLoot(int slotIndex) {
         storedLoot.remove("SLOT_" + slotIndex);
     }
 
-    public List<SpawnerLootEntry> getPageLootEntries(int page, int itemsPerPage) {
+    /**
+     * Takes up to {@code amount} out of one slot, but only while that slot still holds
+     * {@code material}. Every viewer of the storage menu looks at its own copy of the slots, so
+     * this entry, not what a viewer happens to see, decides how much there is to hand out.
+     *
+     * @return how many items were actually taken, 0 when the slot no longer holds that material
+     */
+    public synchronized long takeSlotLoot(int slotIndex, Material material, long amount) {
+        String key = "SLOT_" + slotIndex;
+        SpawnerLootEntry entry = storedLoot.get(key);
+        if (entry == null || material == null || entry.getMaterial() != material || amount <= 0L) {
+            return 0L;
+        }
+
+        long taken = Math.min(amount, entry.getAmount());
+        long remaining = entry.getAmount() - taken;
+        if (remaining <= 0L) {
+            storedLoot.remove(key);
+        } else {
+            storedLoot.put(key, new SpawnerLootEntry(key, material, remaining));
+        }
+        return taken;
+    }
+
+    /**
+     * Adds up to {@code amount} to one slot without going past {@code maxStack}. A slot that
+     * already holds a different material is left alone, so a stale view can never overwrite it.
+     *
+     * @return how many items were actually added
+     */
+    public synchronized long addSlotLoot(int slotIndex, Material material, long amount, long maxStack) {
+        if (slotIndex < 0 || material == null || amount <= 0L || maxStack <= 0L) {
+            return 0L;
+        }
+
+        String key = "SLOT_" + slotIndex;
+        SpawnerLootEntry entry = storedLoot.get(key);
+        if (entry != null && entry.getMaterial() != material) {
+            return 0L;
+        }
+
+        long current = entry == null ? 0L : entry.getAmount();
+        long added = Math.min(amount, maxStack - current);
+        if (added <= 0L) {
+            return 0L;
+        }
+        storedLoot.put(key, new SpawnerLootEntry(key, material, current + added));
+        return added;
+    }
+
+    public synchronized List<SpawnerLootEntry> getPageLootEntries(int page, int itemsPerPage) {
         List<SpawnerLootEntry> entries = new ArrayList<>();
         if (itemsPerPage <= 0) {
             return entries;
@@ -242,7 +294,7 @@ public class SpawnerInstance {
         return entries;
     }
 
-    public void addAutoMobDrop(Material material, long amount, long capPerKey) {
+    public synchronized void addAutoMobDrop(Material material, long amount, long capPerKey) {
         if (material == null || amount <= 0L) {
             return;
         }
@@ -344,7 +396,7 @@ public class SpawnerInstance {
         }
     }
 
-    public long removeStoredLoot(String key, long amount) {
+    public synchronized long removeStoredLoot(String key, long amount) {
         SpawnerLootEntry entry = getStoredLoot(key);
         if (entry == null) {
             return 0L;
@@ -357,11 +409,11 @@ public class SpawnerInstance {
         return removed;
     }
 
-    public void clearStoredLoot() {
+    public synchronized void clearStoredLoot() {
         storedLoot.clear();
     }
 
-    public long getTotalStoredItems() {
+    public synchronized long getTotalStoredItems() {
         long total = 0L;
         for (SpawnerLootEntry entry : storedLoot.values()) {
             total += entry.getAmount();

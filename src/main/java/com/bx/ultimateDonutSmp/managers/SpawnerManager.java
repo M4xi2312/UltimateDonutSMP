@@ -1306,6 +1306,16 @@ public class SpawnerManager {
     }
 
     public void refreshOpenStorageMenus() {
+        refreshStorageMenus(null);
+    }
+
+    // redraws only the storage menus open on one spawner, so other viewers see a change one of
+    // them just made (temporary spawners have negative ids, hence no sentinel value)
+    public void refreshOpenStorageMenus(long spawnerId) {
+        refreshStorageMenus(spawnerId);
+    }
+
+    private void refreshStorageMenus(Long onlySpawnerId) {
         if (openStorageMenus.isEmpty()) {
             return;
         }
@@ -1322,6 +1332,9 @@ public class SpawnerManager {
             }
 
             SpawnerStorageMenu menu = entry.getValue();
+            if (onlySpawnerId != null && menu.getSpawnerId() != onlySpawnerId) {
+                continue;
+            }
             plugin.getSpigotScheduler().runEntity(player, () -> {
                 if (player.isOnline()) {
                     menu.refresh(player);

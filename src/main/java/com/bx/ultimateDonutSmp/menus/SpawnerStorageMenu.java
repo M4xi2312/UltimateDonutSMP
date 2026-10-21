@@ -74,9 +74,14 @@ public class SpawnerStorageMenu extends BaseMenu {
             return;
         }
 
-        int itemsPerPage = plugin.getSpawnerManager().getStorageItemsPerPage();
-        int contentSlots = Math.min(itemsPerPage, topInventory.getSize() - 9);
-        int pageOffset = (page - 1) * itemsPerPage;
+        syncContents(topInventory, instance);
+        player.updateInventory();
+    }
+
+    // draws the content slots from the spawner's stored loot, the one copy every viewer shares
+    private void syncContents(Inventory topInventory, SpawnerInstance instance) {
+        int contentSlots = getContentSlots(topInventory);
+        int pageOffset = (page - 1) * plugin.getSpawnerManager().getStorageItemsPerPage();
 
         for (int slot = 0; slot < contentSlots; slot++) {
             int slotIndex = pageOffset + slot;
@@ -94,7 +99,21 @@ public class SpawnerStorageMenu extends BaseMenu {
                 }
             }
         }
-        player.updateInventory();
+    }
+
+    private int getContentSlots(Inventory topInventory) {
+        return Math.min(plugin.getSpawnerManager().getStorageItemsPerPage(), topInventory.getSize() - 9);
+    }
+
+    // storage only remembers a material and an amount, so anything carrying damage, enchantments,
+    // contents or other custom data would come back out as a fresh copy and lose all of that
+    static boolean isPlainItem(ItemStack item) {
+        return item != null && !item.getType().isAir() && item.isSimilar(new ItemStack(item.getType()));
+    }
+
+    private static int maxStackOf(Material material) {
+        int maxStack = material.getMaxStackSize();
+        return maxStack <= 0 ? 64 : maxStack;
     }
 
     public static ItemStack applyStorageMeta(UltimateDonutSmp plugin, SpawnerInstance instance, Material material, int amount) {
@@ -147,20 +166,6 @@ public class SpawnerStorageMenu extends BaseMenu {
             }
         }
         return Math.max(1, (int) Math.ceil((maxSlotIndex + 1) / (double) itemsPerPage));
-    }
-
-    public static ItemStack stripStorageMeta(ItemStack item) {
-        if (item == null || item.getType().isAir()) {
-            return item;
-        }
-        ItemStack copy = item.clone();
-        var meta = copy.getItemMeta();
-        if (meta != null) {
-            meta.setDisplayName(null);
-            meta.setLore(null);
-            copy.setItemMeta(meta);
-        }
-        return copy;
     }
 
     @Override
@@ -324,48 +329,47 @@ public class SpawnerStorageMenu extends BaseMenu {
                 ItemStack current = event.getCurrentItem();
                 if (current != null && !current.getType().isAir()) {
                     event.setCancelled(true);
+                    if (!isPlainItem(current)) {
+                        player.updateInventory();
+                        return;
+                    }
+
                     Material mat = current.getType();
                     int remainingToAdd = current.getAmount();
-                    int maxStack = mat.getMaxStackSize();
-                    if (maxStack <= 0) maxStack = 64;
+                    int maxStack = maxStackOf(mat);
+                    int contentSlots = getContentSlots(topInventory);
 
-                    // Step A: Top up existing slots of same material in top inventory (0..44)
-                    for (int s = 0; s < lastRow && remainingToAdd > 0; s++) {
-                        ItemStack inSlot = topInventory.getItem(s);
-                        if (inSlot != null && inSlot.getType() == mat && inSlot.getAmount() < maxStack) {
-                            int space = maxStack - inSlot.getAmount();
-                            int add = Math.min(space, remainingToAdd);
-                            int newAmount = inSlot.getAmount() + add;
-                            int slotIndex = pageOffset + s;
-
-                            topInventory.setItem(s, applyStorageMeta(plugin, instance, mat, newAmount));
-                            instance.setSlotLoot(slotIndex, mat, newAmount);
-                            remainingToAdd -= add;
+                    // Step A: Top up stored slots of the same material on this page
+                    for (int s = 0; s < contentSlots && remainingToAdd > 0; s++) {
+                        SpawnerLootEntry stored = instance.getSlotLoot(pageOffset + s);
+                        if (stored != null && stored.getMaterial() == mat) {
+                            remainingToAdd -= (int) instance.addSlotLoot(pageOffset + s, mat, remainingToAdd, maxStack);
                         }
                     }
 
-                    // Step B: Fill first available empty slots if remainder > 0
-                    for (int s = 0; s < lastRow && remainingToAdd > 0; s++) {
-                        ItemStack inSlot = topInventory.getItem(s);
-                        if (inSlot == null || inSlot.getType().isAir()) {
-                            int add = Math.min(maxStack, remainingToAdd);
-                            int slotIndex = pageOffset + s;
-
-                            topInventory.setItem(s, applyStorageMeta(plugin, instance, mat, add));
-                            instance.setSlotLoot(slotIndex, mat, add);
-                            remainingToAdd -= add;
+                    // Step B: Fill the first empty stored slots on this page if remainder > 0
+                    for (int s = 0; s < contentSlots && remainingToAdd > 0; s++) {
+                        if (instance.getSlotLoot(pageOffset + s) == null) {
+                            remainingToAdd -= (int) instance.addSlotLoot(pageOffset + s, mat, remainingToAdd, maxStack);
                         }
                     }
 
-                    instance.setUpdatedAt(System.currentTimeMillis());
-                    plugin.getSpawnerManager().saveLoot(instance);
+                    boolean changed = remainingToAdd < current.getAmount();
+                    if (changed) {
+                        instance.setUpdatedAt(System.currentTimeMillis());
+                        plugin.getSpawnerManager().saveLoot(instance);
 
-                    if (remainingToAdd <= 0) {
-                        event.setCurrentItem(null);
-                    } else {
-                        current.setAmount(remainingToAdd);
+                        if (remainingToAdd <= 0) {
+                            event.setCurrentItem(null);
+                        } else {
+                            current.setAmount(remainingToAdd);
+                        }
                     }
+                    syncContents(topInventory, instance);
                     player.updateInventory();
+                    if (changed) {
+                        plugin.getSpawnerManager().refreshOpenStorageMenus(spawnerId);
+                    }
                 }
             }
             return;
@@ -391,6 +395,7 @@ public class SpawnerStorageMenu extends BaseMenu {
             } else if (rawSlot == collectSlot) {
                 player.sendMessage(ColorUtils.toComponent(plugin.getSpawnerManager().collectAllLoot(player, instance).message()));
                 new SpawnerStorageMenu(plugin, spawnerId, page).open(player);
+                plugin.getSpawnerManager().refreshOpenStorageMenus(spawnerId);
             } else if (rawSlot == prevSlot && page > 1) {
                 new SpawnerStorageMenu(plugin, spawnerId, page - 1).open(player);
             } else if (rawSlot == nextSlot && page <= countStoredPages(instance, itemsPerPage)) {
@@ -398,6 +403,7 @@ public class SpawnerStorageMenu extends BaseMenu {
             } else if (rawSlot == dropSlot) {
                 player.sendMessage(ColorUtils.toComponent(plugin.getSpawnerManager().dropPageLoot(player, instance, page).message()));
                 new SpawnerStorageMenu(plugin, spawnerId, page).open(player);
+                plugin.getSpawnerManager().refreshOpenStorageMenus(spawnerId);
             } else if (rawSlot == sellSlot) {
                 plugin.getSpawnerManager().playSellConfirmOpenSound(player);
                 new SpawnerSellConfirmMenu(plugin, spawnerId, page).open(player);
@@ -409,6 +415,11 @@ public class SpawnerStorageMenu extends BaseMenu {
         // 3. Click in storage content slots (Slots 0 to 44)
         if (rawSlot >= 0 && rawSlot < lastRow) {
             event.setCancelled(true);
+            if (rawSlot >= getContentSlots(topInventory)) {
+                // the gap a shorter page leaves above the control bar belongs to the next page's slots
+                player.updateInventory();
+                return;
+            }
             int slotIndex = pageOffset + rawSlot;
             ItemStack slotItem = topInventory.getItem(rawSlot);
 
@@ -438,110 +449,84 @@ public class SpawnerStorageMenu extends BaseMenu {
 
             // Case A: Holding Item on Cursor
             if (cursorItem != null && !cursorItem.getType().isAir()) {
-                if (clickType.isRightClick()) {
-                    // Right Click -> Place 1 item from cursor into slot (1-by-1 split or merge 1)
-                    if (slotItem == null || slotItem.getType().isAir()) {
-                        topInventory.setItem(rawSlot, applyStorageMeta(plugin, instance, cursorItem.getType(), 1));
-                        instance.setSlotLoot(slotIndex, cursorItem.getType(), 1);
-                        instance.setUpdatedAt(System.currentTimeMillis());
-                        plugin.getSpawnerManager().saveLoot(instance);
-
-                        cursorItem.setAmount(cursorItem.getAmount() - 1);
-                        event.setCursor(cursorItem.getAmount() <= 0 ? null : cursorItem);
-                    } else if (slotItem.getType() == cursorItem.getType()) {
-                        int maxStack = slotItem.getType().getMaxStackSize();
-                        if (slotItem.getAmount() < maxStack) {
-                            int newAmount = slotItem.getAmount() + 1;
-                            topInventory.setItem(rawSlot, applyStorageMeta(plugin, instance, slotItem.getType(), newAmount));
-                            instance.setSlotLoot(slotIndex, slotItem.getType(), newAmount);
-                            instance.setUpdatedAt(System.currentTimeMillis());
-                            plugin.getSpawnerManager().saveLoot(instance);
-
-                            cursorItem.setAmount(cursorItem.getAmount() - 1);
-                            event.setCursor(cursorItem.getAmount() <= 0 ? null : cursorItem);
-                        }
-                    }
+                if (!isPlainItem(cursorItem)) {
                     player.updateInventory();
                     return;
                 }
 
-                // Left Click -> Place entire cursor stack into slot (or merge cursor stack into slot)
-                if (slotItem == null || slotItem.getType().isAir()) {
-                    topInventory.setItem(rawSlot, applyStorageMeta(plugin, instance, cursorItem.getType(), cursorItem.getAmount()));
-                    instance.setSlotLoot(slotIndex, cursorItem.getType(), cursorItem.getAmount());
+                // Right Click -> Place 1 item from cursor, Left Click -> place as much of the cursor stack as fits.
+                // The stored slot decides what fits, so a stale view can never overwrite a different item.
+                Material mat = cursorItem.getType();
+                int toPlace = clickType.isRightClick() ? 1 : cursorItem.getAmount();
+                int placed = (int) instance.addSlotLoot(slotIndex, mat, toPlace, maxStackOf(mat));
+                if (placed > 0) {
                     instance.setUpdatedAt(System.currentTimeMillis());
                     plugin.getSpawnerManager().saveLoot(instance);
-                    event.setCursor(null);
-                } else if (slotItem.getType() == cursorItem.getType()) {
-                    int maxStack = slotItem.getType().getMaxStackSize();
-                    int space = maxStack - slotItem.getAmount();
-                    if (space > 0) {
-                        int add = Math.min(space, cursorItem.getAmount());
-                        int newAmount = slotItem.getAmount() + add;
-                        topInventory.setItem(rawSlot, applyStorageMeta(plugin, instance, slotItem.getType(), newAmount));
-                        instance.setSlotLoot(slotIndex, slotItem.getType(), newAmount);
-                        instance.setUpdatedAt(System.currentTimeMillis());
-                        plugin.getSpawnerManager().saveLoot(instance);
 
-                        cursorItem.setAmount(cursorItem.getAmount() - add);
-                        event.setCursor(cursorItem.getAmount() <= 0 ? null : cursorItem);
-                    }
+                    cursorItem.setAmount(cursorItem.getAmount() - placed);
+                    event.setCursor(cursorItem.getAmount() <= 0 ? null : cursorItem);
                 }
+                syncContents(topInventory, instance);
                 player.updateInventory();
+                if (placed > 0) {
+                    plugin.getSpawnerManager().refreshOpenStorageMenus(spawnerId);
+                }
                 return;
             }
 
             // Case B: Cursor is Empty
             if (slotItem != null && !slotItem.getType().isAir()) {
+                // Every viewer has a copy of the slots, so hand out what the spawner still holds,
+                // not what this view shows. A view that no longer matches is only redrawn.
+                SpawnerLootEntry stored = instance.getSlotLoot(slotIndex);
+                if (stored == null || stored.getAmount() <= 0L || stored.getMaterial() != slotItem.getType()) {
+                    syncContents(topInventory, instance);
+                    player.updateInventory();
+                    return;
+                }
+
+                Material mat = stored.getMaterial();
+                int maxStack = maxStackOf(mat);
+                int available = (int) Math.min(stored.getAmount(), maxStack);
+                int taken;
+
                 if (clickType.isShiftClick()) {
                     // Shift + Left Click -> Collect stack to player inventory
-                    ItemStack cleanStack = stripStorageMeta(slotItem);
-                    HashMap<Integer, ItemStack> leftover = player.getInventory().addItem(cleanStack);
-                    if (leftover.isEmpty()) {
-                        topInventory.setItem(rawSlot, null);
-                        instance.removeSlotLoot(slotIndex);
-                    } else {
-                        ItemStack unadded = leftover.values().iterator().next();
-                        topInventory.setItem(rawSlot, applyStorageMeta(plugin, instance, slotItem.getType(), unadded.getAmount()));
-                        instance.setSlotLoot(slotIndex, slotItem.getType(), unadded.getAmount());
+                    taken = (int) instance.takeSlotLoot(slotIndex, mat, available);
+                    if (taken > 0) {
+                        HashMap<Integer, ItemStack> leftover = player.getInventory().addItem(new ItemStack(mat, taken));
+                        for (ItemStack unadded : leftover.values()) {
+                            int putBack = (int) instance.addSlotLoot(slotIndex, mat, unadded.getAmount(), maxStack);
+                            if (putBack < unadded.getAmount()) {
+                                // the slot changed in the meantime, so drop what no longer fits rather than lose it
+                                unadded.setAmount(unadded.getAmount() - putBack);
+                                player.getWorld().dropItemNaturally(player.getLocation(), unadded);
+                            }
+                        }
                     }
-                    instance.setUpdatedAt(System.currentTimeMillis());
-                    plugin.getSpawnerManager().saveLoot(instance);
-                    player.updateInventory();
-                    return;
-                }
-
-                if (clickType.isRightClick()) {
+                } else if (clickType.isRightClick()) {
                     // Right Click with empty cursor -> Pick up HALF stack onto cursor
-                    int totalAmount = slotItem.getAmount();
-                    int half = (int) Math.ceil(totalAmount / 2.0);
-                    int rem = totalAmount - half;
-
-                    ItemStack pickedUpHalf = stripStorageMeta(slotItem);
-                    pickedUpHalf.setAmount(half);
-
-                    if (rem <= 0) {
-                        topInventory.setItem(rawSlot, null);
-                        instance.removeSlotLoot(slotIndex);
-                    } else {
-                        topInventory.setItem(rawSlot, applyStorageMeta(plugin, instance, slotItem.getType(), rem));
-                        instance.setSlotLoot(slotIndex, slotItem.getType(), rem);
+                    taken = (int) instance.takeSlotLoot(slotIndex, mat, (int) Math.ceil(available / 2.0));
+                    if (taken > 0) {
+                        event.setCursor(new ItemStack(mat, taken));
                     }
-                    instance.setUpdatedAt(System.currentTimeMillis());
-                    plugin.getSpawnerManager().saveLoot(instance);
-                    event.setCursor(pickedUpHalf);
-                    player.updateInventory();
-                    return;
+                } else {
+                    // Normal Left Click -> Pick up FULL stack onto cursor
+                    taken = (int) instance.takeSlotLoot(slotIndex, mat, available);
+                    if (taken > 0) {
+                        event.setCursor(new ItemStack(mat, taken));
+                    }
                 }
 
-                // Normal Left Click -> Pick up FULL stack onto cursor
-                ItemStack pickedUp = stripStorageMeta(slotItem);
-                topInventory.setItem(rawSlot, null);
-                instance.removeSlotLoot(slotIndex);
-                instance.setUpdatedAt(System.currentTimeMillis());
-                plugin.getSpawnerManager().saveLoot(instance);
-                event.setCursor(pickedUp);
+                if (taken > 0) {
+                    instance.setUpdatedAt(System.currentTimeMillis());
+                    plugin.getSpawnerManager().saveLoot(instance);
+                }
+                syncContents(topInventory, instance);
                 player.updateInventory();
+                if (taken > 0) {
+                    plugin.getSpawnerManager().refreshOpenStorageMenus(spawnerId);
+                }
             }
         }
     }
@@ -558,9 +543,10 @@ public class SpawnerStorageMenu extends BaseMenu {
             return;
         }
 
-        int lastRow = plugin.getSpawnerManager().getStorageSize() - 9;
+        // dragging only paints this viewer's copy of the slots and never reaches the stored loot,
+        // so items dragged into storage would vanish on the next refresh
         for (int rawSlot : event.getRawSlots()) {
-            if (rawSlot >= lastRow && rawSlot < plugin.getSpawnerManager().getStorageSize()) {
+            if (rawSlot < event.getView().getTopInventory().getSize()) {
                 event.setCancelled(true);
                 player.updateInventory();
                 return;
