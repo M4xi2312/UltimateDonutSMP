@@ -17,6 +17,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -38,6 +39,7 @@ public class NetworkStatusManager {
     private static final String REFRESH_SECONDS_PATH = ROOT_PATH + ".REFRESH-SECONDS";
     private static final String TIMEOUT_MS_PATH = ROOT_PATH + ".TIMEOUT-MS";
     private static final String ENDPOINT_PATH = ROOT_PATH + ".ENDPOINT";
+    private static final String DEFAULT_ENDPOINT_TOKEN = "change-me";
 
     private final UltimateDonutSmp plugin;
     private HttpClient httpClient;
@@ -398,6 +400,11 @@ public class NetworkStatusManager {
             });
             endpointServer.setExecutor(endpointExecutor);
             endpointServer.start();
+            if (DEFAULT_ENDPOINT_TOKEN.equalsIgnoreCase(getEndpointToken())) {
+                plugin.getLogger().warning("Network status endpoint is running on " + host + ":" + port + path
+                        + " with the default token '" + DEFAULT_ENDPOINT_TOKEN + "'. Set " + ENDPOINT_PATH
+                        + ".TOKEN in network.yml to a long random secret (and use the same value on the servers that poll it).");
+            }
         } catch (IOException exception) {
             plugin.getLogger().warning("failed to start network status endpoint on "
                     + host + ":" + port + path + " (" + exception.getMessage() + ").");
@@ -442,7 +449,9 @@ public class NetworkStatusManager {
         }
 
         String authorization = exchange.getRequestHeaders().getFirst("Authorization");
-        return authorization != null && authorization.equals("Bearer " + expectedToken);
+        return authorization != null && MessageDigest.isEqual(
+                authorization.getBytes(StandardCharsets.UTF_8),
+                ("Bearer " + expectedToken).getBytes(StandardCharsets.UTF_8));
     }
 
     private void sendEndpointResponse(HttpExchange exchange, int statusCode, String body) throws IOException {
