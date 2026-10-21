@@ -2837,7 +2837,9 @@ public class DatabaseManager {
                     psInsert.setLong(2, amount);
                     psInsert.setDouble(3, price);
                     psInsert.executeUpdate();
-                } catch (SQLException ignored) {}
+                } catch (SQLException e) {
+                    plugin.getLogger().log(Level.WARNING, "Failed to insert item sell summary for " + itemName, e);
+                }
             }
         } catch (SQLException e) {
             plugin.getLogger().log(Level.FINE, "Failed to update item sell summary", e);
@@ -2858,7 +2860,9 @@ public class DatabaseManager {
                     psInsert.setDouble(2, price);
                     psInsert.setLong(3, amount);
                     psInsert.executeUpdate();
-                } catch (SQLException ignored) {}
+                } catch (SQLException e) {
+                    plugin.getLogger().log(Level.WARNING, "Failed to insert player sell summary for " + playerUuidStr, e);
+                }
             }
         } catch (SQLException e) {
             plugin.getLogger().log(Level.FINE, "Failed to update player sell summary", e);
@@ -3418,13 +3422,17 @@ public class DatabaseManager {
                 "UPDATE sell_history SET timestamp = ? WHERE timestamp IS NULL OR timestamp = 0")) {
             ps.setLong(1, now);
             ps.executeUpdate();
-        } catch (SQLException ignored) {}
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.WARNING, "Failed to backfill missing sell history timestamps", e);
+        }
 
         try (PreparedStatement ps = connection.prepareStatement(
                 "UPDATE player_logs SET timestamp = ? WHERE timestamp IS NULL OR timestamp = 0")) {
             ps.setLong(1, now);
             ps.executeUpdate();
-        } catch (SQLException ignored) {}
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.WARNING, "Failed to backfill missing player log timestamps", e);
+        }
     }
 
     public int countSellDocuments() {
