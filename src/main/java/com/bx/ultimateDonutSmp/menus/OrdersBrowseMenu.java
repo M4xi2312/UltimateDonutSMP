@@ -21,6 +21,8 @@ public class OrdersBrowseMenu extends BaseMenu {
     private final OrderSort sortMode;
     private final String categoryFilter;
     private final String query;
+    /** The orders this page was built from, so a click lands on the order the player actually saw. */
+    private List<Order> builtOrders;
 
     public OrdersBrowseMenu(UltimateDonutSmp plugin, int page, OrderSort sortMode, String categoryFilter) {
         this(plugin, page, sortMode, categoryFilter, "");
@@ -47,6 +49,7 @@ public class OrdersBrowseMenu extends BaseMenu {
         state.search(query);
 
         List<Order> orders = visibleOrders();
+        builtOrders = orders;
         int itemsPerPage = Math.min(45, manager.getBrowseItemsPerPage());
         int startIndex = (page - 1) * itemsPerPage;
         int endIndex = Math.min(orders.size(), startIndex + itemsPerPage);
@@ -144,7 +147,7 @@ public class OrdersBrowseMenu extends BaseMenu {
     @Override
     public void handleClick(int slot, Player player, ClickType clickType) {
         OrdersManager manager = plugin.getOrdersManager();
-        List<Order> orders = visibleOrders();
+        List<Order> orders = builtOrders != null ? builtOrders : visibleOrders();
         int itemsPerPage = Math.min(45, manager.getBrowseItemsPerPage());
 
         int prevSlot = OrdersMenuSupport.slot(plugin, "GUI.MAIN.BUTTONS.PREV.SLOT", 45);

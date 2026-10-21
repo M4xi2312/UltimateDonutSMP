@@ -58,7 +58,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -67,6 +66,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 
 public class OrdersManager {
@@ -270,9 +270,12 @@ public class OrdersManager {
     ) {}
 
     private final UltimateDonutSmp plugin;
-    private final Set<UUID> activeTransactions = new HashSet<>();
-    private final Map<UUID, Long> lastClickTimes = new HashMap<>();
-    private final Map<UUID, NewOrderSession> pendingCreations = new HashMap<>();
+    /** How long one read of the active orders serves every browser before the database is asked again. */
+    private static final long ACTIVE_ORDERS_CACHE_MILLIS = 2000L;
+
+    private final Set<UUID> activeTransactions = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Long> lastClickTimes = new ConcurrentHashMap<>();
+    private final Map<UUID, NewOrderSession> pendingCreations = new ConcurrentHashMap<>();
     private final Map<UUID, PendingSearchInput> pendingSearchInputs = new ConcurrentHashMap<>();
     private final Map<UUID, PendingOrderEdit> pendingEdits = new ConcurrentHashMap<>();
     private final Map<String, List<OrderCatalogEntry>> catalogByCategory = new LinkedHashMap<>();
@@ -283,6 +286,11 @@ public class OrdersManager {
     private volatile boolean networkSubscribed;
     private volatile String networkChannel = "";
     private volatile boolean schemaReady;
+    private volatile ActiveOrdersSnapshot activeOrdersSnapshot;
+    private final AtomicLong activeOrdersGeneration = new AtomicLong();
+
+    /** Every active order as last read, shared by all browsers until it ages out or an order changes. */
+    private record ActiveOrdersSnapshot(long loadedAt, List<Order> orders) {}
 
     public OrdersManager(UltimateDonutSmp plugin) {
         this.plugin = plugin;
@@ -291,6 +299,7 @@ public class OrdersManager {
     }
 
     public void reload() {
+        invalidateActiveOrders();
         rebuildCatalog();
         validateConfiguration();
         if (plugin.getRedisManager() != null) {
@@ -351,6 +360,7 @@ public class OrdersManager {
         if (playerUuid == null) {
             return;
         }
+        lastClickTimes.remove(playerUuid);
         OrderUiState state = uiStates.remove(playerUuid);
         if (state != null) {
             saveUiState(state);
@@ -1982,7 +1992,9 @@ public class OrdersManager {
             ps.setLong(5, orderId);
             ps.setString(6, player.getUniqueId().toString());
             ps.setString(7, OrderStatus.ACTIVE.name());
-            return ps.executeUpdate() == 1;
+            boolean updated = ps.executeUpdate() == 1;
+            invalidateActiveOrders();
+            return updated;
         } catch (SQLException exception) {
             plugin.getLogger().log(Level.WARNING, "Failed to update order budget " + orderId, exception);
             return false;
@@ -2102,18 +2114,37 @@ public class OrdersManager {
     }
 
     public List<Order> getActiveOrders(OrderSort sortMode, String categoryKey) {
-        List<Order> orders = new ArrayList<>();
         long now = System.currentTimeMillis();
         String normalizedCategory = normalizeCategory(categoryKey);
+        boolean allCategories = normalizedCategory.equals("ALL");
 
-        String sql = "select * from orders where status = ? and expires_at > ?"
-                + (normalizedCategory.equals("ALL") ? "" : " and category_key = ?");
-        try (PreparedStatement ps = connection().prepareStatement(sql)) {
+        List<Order> orders = new ArrayList<>();
+        for (Order order : activeOrders(now)) {
+            if (order.expiresAt() > now && (allCategories || normalizedCategory.equals(order.categoryKey()))) {
+                orders.add(order);
+            }
+        }
+        orders.sort(resolveComparator(sortMode));
+        return orders;
+    }
+
+    /**
+     * Every browse page and every click on one used to read and deserialize the whole order book.
+     * One read now serves everybody for a couple of seconds, and any change made here drops it at
+     * once, so only edits made on another server can take that long to show.
+     */
+    private List<Order> activeOrders(long now) {
+        ActiveOrdersSnapshot snapshot = activeOrdersSnapshot;
+        if (snapshot != null && now - snapshot.loadedAt() < ACTIVE_ORDERS_CACHE_MILLIS && now >= snapshot.loadedAt()) {
+            return snapshot.orders();
+        }
+
+        long generation = activeOrdersGeneration.get();
+        List<Order> orders = new ArrayList<>();
+        try (PreparedStatement ps = connection().prepareStatement(
+                "select * from orders where status = ? and expires_at > ?")) {
             ps.setString(1, OrderStatus.ACTIVE.name());
             ps.setLong(2, now);
-            if (!normalizedCategory.equals("ALL")) {
-                ps.setString(3, normalizedCategory);
-            }
 
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
@@ -2125,10 +2156,20 @@ public class OrdersManager {
             }
         } catch (SQLException e) {
             plugin.getLogger().log(Level.WARNING, "Failed to load active orders", e);
+            return orders;
         }
 
-        orders.sort(resolveComparator(sortMode));
-        return orders;
+        List<Order> loaded = List.copyOf(orders);
+        // An order that changed while this read was running leaves the read uncached.
+        if (activeOrdersGeneration.get() == generation) {
+            activeOrdersSnapshot = new ActiveOrdersSnapshot(now, loaded);
+        }
+        return loaded;
+    }
+
+    private void invalidateActiveOrders() {
+        activeOrdersGeneration.incrementAndGet();
+        activeOrdersSnapshot = null;
     }
 
     public List<Order> getOrdersForOwner(UUID ownerUuid, OrderSort sortMode) {
@@ -2428,6 +2469,7 @@ public class OrdersManager {
                         .deposit(player, payout, EconomyReason.ORDER_DELIVERY_PAYOUT);
                 if (!payoutResult.success()) {
                     revertDelivery(liveOrder.id(), player.getUniqueId(), accepted, quantity, payout, now);
+                    invalidateActiveOrders();
                     return new DeliverOrderResult(false, DeliveryFailureReason.PAYOUT_ERROR, liveOrder, 0, 0D);
                 }
 
@@ -3356,7 +3398,9 @@ public class OrdersManager {
     }
 
     private boolean expireOrder(Order order) {
-        return closeOrderAndCreateRefundClaim(order, OrderStatus.EXPIRED, System.currentTimeMillis());
+        boolean expired = closeOrderAndCreateRefundClaim(order, OrderStatus.EXPIRED, System.currentTimeMillis());
+        invalidateActiveOrders();
+        return expired;
     }
 
     private Comparator<Order> resolveComparator(OrderSort sortMode) {
@@ -3956,6 +4000,7 @@ public class OrdersManager {
     }
 
     private void publishOrderEvent(String type, long orderId) {
+        invalidateActiveOrders();
         if (!networkSubscribed || plugin.getRedisManager() == null || networkChannel.isBlank()) {
             return;
         }
@@ -3969,6 +4014,7 @@ public class OrdersManager {
         if (payload == null || payload.isBlank() || payload.startsWith(instanceId + "|")) {
             return;
         }
+        invalidateActiveOrders();
         plugin.getSpigotScheduler().forEachOnlinePlayer(player -> {
             if (!player.isOnline()
                     || player.getOpenInventory().getTopInventory().getHolder() == null
