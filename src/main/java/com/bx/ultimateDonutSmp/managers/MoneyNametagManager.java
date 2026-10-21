@@ -21,12 +21,14 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.TextDisplay;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.logging.Level;
 
 /**
@@ -109,9 +111,10 @@ public class MoneyNametagManager {
             clearAll();
             return;
         }
+        TargetTexts texts = newTargetTexts();
         for (Player viewer : Bukkit.getOnlinePlayers()) {
             if (isEnabledFor(viewer)) {
-                push(viewer);
+                push(viewer, texts);
             } else {
                 clearViewer(viewer);
             }
@@ -138,7 +141,7 @@ public class MoneyNametagManager {
             clearViewer(viewer);
             return;
         }
-        push(viewer);
+        push(viewer, newTargetTexts());
     }
 
     /** Drops everything remembered about a player, as a viewer and as somebody being viewed. */
@@ -185,7 +188,7 @@ public class MoneyNametagManager {
         }
     }
 
-    private void push(Player viewer) {
+    private void push(Player viewer, TargetTexts texts) {
         if (!installed.contains(viewer.getUniqueId())) {
             if (!sendObjective(viewer, OBJECTIVE_CREATE) || !sendDisplaySlot(viewer)) {
                 return;
@@ -199,7 +202,7 @@ public class MoneyNametagManager {
                 known.remove(target.getUniqueId());
                 continue;
             }
-            String text = ColorUtils.colorize(currentText(target), target);
+            String text = texts.textFor(target);
             if (!text.equals(known.get(target.getUniqueId())) && sendScore(viewer, target.getName(), text)) {
                 known.put(target.getUniqueId(), text);
             }
@@ -213,11 +216,29 @@ public class MoneyNametagManager {
         }
     }
 
-    private String currentText(Player target) {
-        return render(
-                config().getString("MONEY-NAMETAGS.FORMAT", "&a$ &f{balance}"),
-                plugin.getEconomyManager().getBalance(target),
-                config().getBoolean("MONEY-NAMETAGS.SHORT-FORMAT", true));
+    /**
+     * The line under a name depends only on whose name it is, so one pass reads the config once and
+     * renders each target once, however many viewers then receive it.
+     */
+    private TargetTexts newTargetTexts() {
+        String format = config().getString("MONEY-NAMETAGS.FORMAT", "&a$ &f{balance}");
+        boolean shortFormat = config().getBoolean("MONEY-NAMETAGS.SHORT-FORMAT", true);
+        return new TargetTexts(target -> ColorUtils.colorize(
+                render(format, plugin.getEconomyManager().getBalance(target), shortFormat), target));
+    }
+
+    /** Renders each target's line at most once per pass and hands the same text to every viewer. */
+    static final class TargetTexts {
+        private final Function<Player, String> renderer;
+        private final Map<UUID, String> texts = new HashMap<>();
+
+        TargetTexts(Function<Player, String> renderer) {
+            this.renderer = renderer;
+        }
+
+        String textFor(Player target) {
+            return texts.computeIfAbsent(target.getUniqueId(), key -> renderer.apply(target));
+        }
     }
 
     /** Hidden players keep their balance to themselves. */
